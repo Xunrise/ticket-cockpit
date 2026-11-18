@@ -255,7 +255,7 @@ echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabili
 read l2
 read l3
 case "$l3" in
-  *'"limit":1'*'"name":"list_meetings"'*) echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"id\":\"2026-11-18T10-00-00\",\"title\":\"Standup\",\"start\":\"2026-11-18T10:00:00\",\"minutes\":15,\"projects\":[\"Alpha\"]}"}]}}';;
+  *'"name":"list_meetings"'*'"limit":1'*) echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"id\":\"2026-11-18T10-00-00\",\"title\":\"Standup\",\"start\":\"2026-11-18T10:00:00\",\"minutes\":15,\"projects\":[\"Alpha\"]}"}]}}';;
   *'"name":"list_projects"'*) echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"name\":\"Alpha\",\"meetings\":3}"},{"type":"text","text":"{\"name\":\"Beta\",\"meetings\":1}"}]}}';;
   *'"name":"get_meeting"'*) echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"id\":\"m1\",\"title\":\"Design review\",\"start\":\"2026-11-18T10:00:00\",\"minutes\":30,\"notes\":{\"summary\":\"We agreed.\",\"next_steps\":[{\"task\":\"Ship it\",\"owner\":\"Ann\"},\"Write docs\"],\"decisions\":[\"Use SQLite\"]},\"transcript\":[{\"speaker\":\"Ann\",\"text\":\"Hello\"}]}"}]}}';;
   *'"name":"fail"'*) echo '{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[{"type":"text","text":"project not found"}]}}';;

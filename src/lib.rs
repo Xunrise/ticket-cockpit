@@ -4,6 +4,7 @@ pub mod ctx;
 pub mod daemon;
 pub mod db;
 pub mod http;
+pub mod install;
 pub mod palaver;
 pub mod panes;
 pub mod paths;

@@ -26,8 +26,7 @@ fn run(mut args: Vec<String>) -> anyhow::Result<()> {
             cockpit::sessions::run_hook(&input); // never fails: a hook must not break a session
             Ok(())
         }
-        // TODO(plan step 11): idempotent setup of the config dir, tmux config, launchd agent and global hooks
-        Some("install") => anyhow::bail!("`install` is not implemented yet (TODO: plan step 11)"),
+        Some("install" | "uninstall") => cockpit::install::command(args),
         // TODO(plan step 12): seed a fresh install from existing Claude transcripts
         Some("onboard") => anyhow::bail!("`onboard` is not implemented yet (TODO: plan step 12)"),
         Some(other) => anyhow::bail!("unknown command {other}"),

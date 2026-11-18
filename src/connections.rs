@@ -24,8 +24,7 @@ impl Default for Endpoints {
     }
 }
 
-const HOOK_EVENTS: [&str; 7] =
-    ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"];
+use crate::install::HOOK_EVENTS;
 
 fn help(name: &str) -> &'static str {
     match name {

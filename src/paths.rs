@@ -2,7 +2,7 @@
 //! files next to it), so test and validation databases never touch the real install.
 use std::path::PathBuf;
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
 

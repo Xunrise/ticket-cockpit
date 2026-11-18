@@ -24,15 +24,15 @@ pub fn run(port: u16) -> Result<()> {
     })
 }
 
-fn domain() -> String {
+pub fn domain() -> String {
     format!("gui/{}", sh("id", &["-u"], None))
 }
 
-fn target() -> String {
+pub fn target() -> String {
     format!("{}/{LABEL}", domain())
 }
 
-fn launchctl(args: &[&str]) -> Result<String> {
+pub fn launchctl(args: &[&str]) -> Result<String> {
     let out = std::process::Command::new("launchctl").args(args).output().map_err(|e| anyhow!("launchctl: {e}"))?;
     if !out.status.success() {
         bail!("launchctl {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
@@ -62,13 +62,13 @@ fn installed() -> bool {
     paths::launch_agent_plist().exists()
 }
 
-fn loaded() -> bool {
+pub fn loaded() -> bool {
     launchctl(&["print", &target()]).is_ok()
 }
 
 fn install_hint() -> String {
     format!(
-        "The launchd agent {LABEL} is not installed ({} is missing).\nSet it up with `cockpit install` (not implemented yet in this build), or run the daemon in the foreground: `cockpit daemon run`.",
+        "The launchd agent {LABEL} is not installed ({} is missing).\nSet it up with `cockpit install`, or run the daemon in the foreground: `cockpit daemon run`.",
         paths::launch_agent_plist().display()
     )
 }
