@@ -74,6 +74,7 @@ pub enum Pick {
     Meeting,
     Cluster,
     OpenProject,
+    CloseOut,
 }
 
 /// A fuzzy picker over (label, value, detail). Project and cluster pickers offer "+ new …" as the last entry.

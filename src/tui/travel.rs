@@ -130,6 +130,11 @@ impl Travel {
         replies: &[(char, String)],
     ) -> SyncOut {
         let mut out = SyncOut::default();
+        // the daemon may have moved the queue home when it closed the window the queue sat in
+        let mine = self.win_of(&self.me);
+        if !mine.is_empty() && mine != self.at_win {
+            self.at_win = mine;
+        }
         let pane = focus.and_then(|r| r.cockpit_pane.clone());
         let want =
             pane.as_deref().map(|p| self.win_of(p)).filter(|w| !w.is_empty()).unwrap_or_else(|| self.home_win.clone());

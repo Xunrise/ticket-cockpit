@@ -68,6 +68,29 @@ pub fn explain(settings: &[Value], conns: &[Value], i: usize) -> String {
     }
 }
 
+/// The right side for the Update entry: channel, installed, available, then the commits or release notes.
+pub fn explain_update(u: &Value) -> String {
+    let b = |t: &str| format!("\x1b[1m{t}\x1b[0m");
+    let d = |t: &str| format!("\x1b[2m{t}\x1b[0m");
+    let mut o = format!("\n  {}   {}\n  {}\n\n", b("Update"), str(u, "channel"), d(str(u, "summary")));
+    o += &format!("  installed  {}\n", str(u, "installed"));
+    o += &format!("  available  {}\n", u["available"].as_str().unwrap_or("nothing newer"));
+    if u["behind_remote"].as_i64().unwrap_or(0) > 0 {
+        o += &format!(
+            "  {}\n",
+            d(&format!("origin/main is {} commits ahead of local main: pull first", u["behind_remote"]))
+        );
+    }
+    let notes = str(u, "notes");
+    if !notes.is_empty() {
+        o += &format!("\n  {}\n", b(if str(u, "channel") == "release" { "Release notes" } else { "Commits" }));
+        for l in notes.lines() {
+            o += &format!("  {l}\n");
+        }
+    }
+    o + &format!("\n  {}\n", d("U updates (asks first) · R reloads without building"))
+}
+
 /// `(glyph, color)` of a connection status.
 pub fn status_mark(status: &str) -> (&'static str, Color) {
     match status {
@@ -88,18 +111,22 @@ impl App {
     /// Identifies the explanation shown, so the right pane is redrawn only when it changes.
     pub(super) fn settings_slot_key(&self) -> String {
         let s = &self.settings_state;
-        match self.settings.get(s.sel) {
+        let Some(i) = s.sel.checked_sub(1) else { return format!("update:{}", self.update) };
+        match self.settings.get(i) {
             Some(st) => format!("settings:{}:{}", s.sel, st["value"]),
             None => format!(
                 "settings:{}:{}",
                 s.sel,
-                s.conns.get(s.sel.wrapping_sub(self.settings.len())).map(|c| str(c, "status")).unwrap_or("")
+                s.conns.get(i.wrapping_sub(self.settings.len())).map(|c| str(c, "status")).unwrap_or("")
             ),
         }
     }
 
     pub(super) fn settings_slot_text(&self) -> String {
-        explain(&self.settings, &self.settings_state.conns, self.settings_state.sel)
+        match self.settings_state.sel.checked_sub(1) {
+            None => explain_update(&self.update),
+            Some(i) => explain(&self.settings, &self.settings_state.conns, i),
+        }
     }
 
     fn set_setting(&mut self, key: &str, value: Value) {
@@ -113,7 +140,7 @@ impl App {
     }
 
     pub(super) fn settings_key(&mut self, k: KeyEvent) {
-        let cur = self.settings.get(self.settings_state.sel).cloned();
+        let cur = self.settings_state.sel.checked_sub(1).and_then(|i| self.settings.get(i)).cloned();
         if let Some(t) = self.settings_state.edit.as_mut() {
             match k.code {
                 KeyCode::Esc => self.settings_state.edit = None,
@@ -139,7 +166,7 @@ impl App {
             }
             return;
         }
-        let last = (self.settings.len() + self.settings_state.conns.len()).saturating_sub(1);
+        let last = self.settings.len() + self.settings_state.conns.len();
         match k.code {
             KeyCode::Esc | KeyCode::Char(',') => self.tab = Tab::Queue,
             KeyCode::Char('j') | KeyCode::Down => self.settings_state.sel = (self.settings_state.sel + 1).min(last),
@@ -152,6 +179,7 @@ impl App {
                     }
                 }
             }
+            KeyCode::Enter if self.settings_state.sel == 0 => self.confirm = Some(super::app::Confirm::Update),
             KeyCode::Enter => {
                 if let Some(st) = &cur {
                     match &st["value"] {
@@ -177,8 +205,20 @@ impl App {
             ListItem::new(""),
             ListItem::new(Line::from(" SETTINGS").bold()),
         ];
+        let u = &self.update;
+        let mut ul = vec![
+            Line::from(vec![
+                Span::raw(" Update  ").bold(),
+                Span::raw(format!("{} · {}", str(u, "channel"), str(u, "installed"))),
+            ]),
+            Line::from(format!("   {}", u["summary"].as_str().unwrap_or("not checked yet"))).dim(),
+        ];
+        if s.sel == 0 {
+            ul.push(chips(&[("U", "update".into()), ("R", "reload".into())]));
+        }
+        items.push(ListItem::new(ul));
         for (i, st) in self.settings.iter().enumerate() {
-            let val = match (&s.edit, i == s.sel) {
+            let val = match (&s.edit, i + 1 == s.sel) {
                 (Some(t), true) => format!("{t}▏"),
                 _ => match &st["value"] {
                     Value::Bool(b) => (if *b { "[x]" } else { "[ ]" }).to_string(),
@@ -190,7 +230,7 @@ impl App {
                 Line::from(vec![Span::raw(format!(" {}  ", str(st, "key").replace('_', " "))).bold(), Span::raw(val)]),
                 Line::from(format!("   {}", str(st, "desc"))).dim(),
             ];
-            if i == s.sel && s.edit.is_none() {
+            if i + 1 == s.sel && s.edit.is_none() {
                 lines.push(chips(&[
                     ("⏎", if st["value"].is_boolean() { "toggle".into() } else { "edit".into() }),
                     ("r", "default".into()),
@@ -212,7 +252,13 @@ impl App {
             ]));
         }
         let mut ls = ListState::default();
-        ls.select(Some(if s.sel < self.settings.len() { s.sel + 3 } else { s.sel + 5 }));
+        ls.select(Some(if s.sel == 0 {
+            3
+        } else if s.sel <= self.settings.len() {
+            s.sel + 3
+        } else {
+            s.sel + 5
+        }));
         f.render_stateful_widget(
             List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
             area,

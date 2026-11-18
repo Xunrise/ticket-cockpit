@@ -304,6 +304,10 @@ impl App {
                     self.picker = Some(p);
                 }
             }
+            KeyCode::Char('C') => match &cur {
+                Some(r) => self.picker = Some(super::app::close_out_picker(&r.key)),
+                None => self.flash = "no ticket selected".into(),
+            },
             KeyCode::Char('H') => {
                 if let Some(project) = self.projects.open.clone() {
                     self.flash = match self.api.tool("project.housekeep", json!({"project": project})) {
@@ -395,6 +399,7 @@ impl App {
                         }
                         if r.status != "done" {
                             h.push(("g", "cluster".into()));
+                            h.push(("C", "close out".into()));
                         }
                         lines.push(chips(&h));
                     }
@@ -434,7 +439,7 @@ impl App {
         if self.projects.open.is_none() {
             " ⇥ tabs · j/k move · ⏎ open project · , settings · q leave"
         } else {
-            " ⇥ tabs · esc projects · o switch project · j/k move · / filter · n new task · g cluster · H let Claude housekeep · s start/restart · S in background · ⏎ open session/window · q leave"
+            " ⇥ tabs · esc projects · o switch project · j/k move · / filter · n new task · g cluster · C close out · H let Claude housekeep · s start/restart · S in background · ⏎ open session/window · ! improve the cockpit · R reload · U update · q leave"
         }
     }
 }

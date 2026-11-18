@@ -17,6 +17,13 @@ use ratatui::{
 };
 use serde_json::{json, Value};
 
+/// A y/n question in the footer.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Confirm {
+    Reload,
+    Update,
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tab {
     Queue,
@@ -43,6 +50,13 @@ pub struct App {
     pub flash: String,
     /// The reply line (`r`).
     pub input: Option<String>,
+    /// `!`: the "improve the cockpit" line.
+    pub fb_input: Option<String>,
+    /// Close now: `(ticket key, summary)`.
+    pub summary_input: Option<(String, String)>,
+    pub confirm: Option<Confirm>,
+    /// The daemon's update check.
+    pub update: Value,
     pub projects: projects::State,
     pub settings_state: settings::State,
     pub picker: Option<Picker>,
@@ -80,6 +94,10 @@ impl App {
             context: vec![],
             flash: String::new(),
             input: None,
+            fb_input: None,
+            summary_input: None,
+            confirm: None,
+            update: Value::Null,
             projects: Default::default(),
             settings_state: Default::default(),
             picker: None,
@@ -136,6 +154,9 @@ impl App {
                 self.load_state(&st);
                 if let Ok(s) = self.tool("settings.get", json!({})) {
                     self.settings = s.as_array().cloned().unwrap_or_default();
+                }
+                if let Ok(u) = self.tool("cockpit.update_status", json!({})) {
+                    self.update = u;
                 }
             }
             Err(e) if is_down(&e) => self.down = Some(e),
@@ -286,6 +307,53 @@ impl App {
             }
             return;
         }
+        if let Some(t) = self.fb_input.as_mut() {
+            match k.code {
+                KeyCode::Esc => self.fb_input = None,
+                KeyCode::Backspace => {
+                    t.pop();
+                }
+                KeyCode::Char(c) => t.push(c),
+                KeyCode::Enter => {
+                    let text = std::mem::take(t);
+                    self.fb_input = None;
+                    self.file_feedback(&text);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some((key, t)) = self.summary_input.as_mut() {
+            match k.code {
+                KeyCode::Esc => self.summary_input = None,
+                KeyCode::Backspace => {
+                    t.pop();
+                }
+                KeyCode::Char(c) => t.push(c),
+                KeyCode::Enter => {
+                    let (key, text) = (std::mem::take(key), std::mem::take(t));
+                    self.summary_input = None;
+                    self.close_out(&key, "now", &text);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(c) = self.confirm.take() {
+            if k.code == KeyCode::Char('y') {
+                let (tool, win) = match c {
+                    Confirm::Reload => ("cockpit.reload", "cockpit-reload"),
+                    Confirm::Update => ("cockpit.update", "cockpit-update"),
+                };
+                self.flash = match self.tool(tool, json!({})) {
+                    Ok(_) => format!("running in the {win} window"),
+                    Err(e) => e,
+                };
+            } else {
+                self.flash = "cancelled".into();
+            }
+            return;
+        }
         if self.projects.input.is_some() {
             return self.projects_input_key(k);
         }
@@ -293,6 +361,9 @@ impl App {
             return self.settings_key(k);
         }
         match k.code {
+            KeyCode::Char('!') => self.fb_input = Some(String::new()),
+            KeyCode::Char('R') => self.confirm = Some(Confirm::Reload),
+            KeyCode::Char('U') => self.confirm = Some(Confirm::Update),
             KeyCode::Char(',') if self.tab != Tab::Settings => self.enter_settings(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             // q leaves the cockpit (it keeps running, like a daemon); Q stops the queue itself
@@ -332,6 +403,10 @@ impl App {
     fn queue_key(&mut self, k: KeyEvent) {
         let cur = self.cur().cloned();
         match k.code {
+            KeyCode::Char('C') => match cur.filter(|r| !r.key.is_empty()) {
+                Some(r) => self.picker = Some(close_out_picker(&r.key)),
+                None => self.flash = "no ticket on this row".into(),
+            },
             KeyCode::Char('p') => match cur.filter(|r| !r.key.is_empty()) {
                 Some(r) => self.picker = self.project_picker(&r.key, false),
                 None => self.flash = "no ticket on this row".into(),
@@ -435,6 +510,35 @@ impl App {
                 .cloned()
                 .unwrap_or_else(|| queue::window_row(key, key, str(w, "pane"))),
         )
+    }
+
+    /// Calls `ticket.close_out`; a refusal (draft in the prompt, open question) is shown and nothing is marked.
+    pub fn close_out(&mut self, key: &str, mode: &str, summary: &str) {
+        self.flash = match self.tool("ticket.close_out", json!({"key": key, "mode": mode, "summary": summary})) {
+            Ok(r) if r["ok"] == false => format!("not sent: {}", str(&r, "refused")),
+            Ok(r) => str(&r, "msg").to_string(),
+            Err(e) => e,
+        };
+    }
+
+    fn feedback_context(&self) -> Value {
+        let selected = match self.tab {
+            Tab::Queue => self.cur().map(|r| format!("{} [{}] {}", r.key, queue::SECTIONS[r.section].0, r.label)),
+            Tab::Projects => self.projects.cur().map(|r| r.label.clone()).or_else(|| self.projects.open.clone()),
+            Tab::Settings => {
+                self.settings.get(self.settings_state.sel.saturating_sub(1)).map(|s| str(s, "key").to_string())
+            }
+        };
+        json!({"tab": format!("{:?}", self.tab), "selected": selected.unwrap_or_default(), "flash": self.flash})
+    }
+
+    /// `!`: files the text (or the last error when empty) as a ticket in the cockpit project.
+    fn file_feedback(&mut self, text: &str) {
+        let ctx = self.feedback_context();
+        self.flash = match self.tool("cockpit.feedback", json!({"text": text, "context": ctx})) {
+            Ok(r) => format!("filed {}", str(&r, "key")),
+            Err(e) => e,
+        };
     }
 
     // ---- pickers ---------------------------------------------------------------------------------------------
@@ -593,6 +697,13 @@ impl App {
                 };
                 None
             }
+            Pick::CloseOut => {
+                match v {
+                    "now" => self.summary_input = Some((key.to_string(), String::new())),
+                    mode => self.close_out(key, mode, ""),
+                }
+                None
+            }
             Pick::OpenProject => {
                 self.projects.open = Some(v.to_string());
                 self.projects.psel = 0;
@@ -659,6 +770,23 @@ impl App {
         if let Some(t) = &self.input {
             return input_line("reply", t);
         }
+        if let Some(t) = &self.fb_input {
+            return input_line("improve the cockpit", t);
+        }
+        if let Some((k, t)) = &self.summary_input {
+            return input_line(&format!("summary for {k} (may be empty)"), t);
+        }
+        if let Some(c) = self.confirm {
+            let what = match c {
+                Confirm::Reload => {
+                    "Reload the cockpit (restart the daemon, replace the queue with the installed binary)?".to_string()
+                }
+                Confirm::Update => {
+                    format!("Update the cockpit ({})? It builds/downloads in a window, then reloads.", self.channel())
+                }
+            };
+            return Line::from(format!(" {what} (y/n)")).yellow();
+        }
         if let Some(l) = self.projects_input_line() {
             return l;
         }
@@ -667,17 +795,46 @@ impl App {
         }
         if self.show_help {
             return Line::from(match self.tab {
-                Tab::Queue => " ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · , settings · s start · S start in background · p project · l link meeting · r reply (quick replies) · 1-4 pick · a accept · x interrupt · q leave · Q stop queue",
+                Tab::Queue => " ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · , settings · s start · S start in background · p project · l link meeting · C close out · r reply (quick replies) · 1-4 pick · a accept · x interrupt · ! improve the cockpit · R reload · U update · q leave · Q stop queue",
                 Tab::Projects => self.projects_help(),
-                Tab::Settings => " ⇥ queue · j/k move · ⏎ change · r default · q leave",
+                Tab::Settings => " ⇥ queue · j/k move · ⏎ change · r default · R reload · U update · ! improve the cockpit · q leave",
             })
             .dim();
         }
         if self.stale_daemon {
             return Line::from(" daemon is a different build: cockpit daemon restart").yellow();
         }
+        if !self.update["available"].is_null() {
+            let what = match self.update["commits_ahead"].as_i64() {
+                Some(1) => "1 commit".to_string(),
+                Some(n) => format!("{n} commits"),
+                None => str(&self.update, "available").to_string(),
+            };
+            return Line::from(format!(" update available: {what} · U to update")).green();
+        }
         Line::from(" ⇥ tabs · ? all keys · q leave").dim()
     }
+
+    /// The update channel as the setting has it (the daemon's check says it too, once it has run).
+    fn channel(&self) -> String {
+        match self.setting("update_channel").as_str().or(self.update["channel"].as_str()) {
+            Some(c) if !c.is_empty() => c.to_string(),
+            _ => "local".into(),
+        }
+    }
+}
+
+/// Close-out menu: Enter takes the first entry.
+pub fn close_out_picker(key: &str) -> Picker {
+    let items = vec![
+        ("Wrap up and close".to_string(), "wrap".to_string(), "Asks the session to finish what the ticket still needs, commit if appropriate, and close it with a summary. The window closes when it is done.".to_string()),
+        ("Close now".to_string(), "now".to_string(), "Marks the ticket done with a summary you type, ends the session and closes the window.".to_string()),
+        ("Close window, keep ticket".to_string(), "keep".to_string(), "Ticket goes back to todo, session ended, window closed.".to_string()),
+        ("Drop ticket".to_string(), "drop".to_string(), "Ticket canceled, window closed.".to_string()),
+    ];
+    let mut p = Picker::new(Pick::CloseOut, format!("Close out {key}"), items);
+    p.key = key.into();
+    p
 }
 
 #[cfg(test)]
@@ -719,7 +876,7 @@ pub mod tests {
                 "NEEDS YOU 1",
                 " DEM-1  Login 42m",
                 "   demo · feat/x · cockpit:DEM-1 · ◆ Demo",
-                "   [⏎] attach  [1-4] pick  [a] accept  [r] reply  [x] interrupt",
+                "   [⏎] attach  [1-4] pick  [a] accept  [r] reply  [x] interrupt  [C] c",
                 "",
                 "YOUR TURN 1",
                 " demo · main 32m",
@@ -743,7 +900,7 @@ pub mod tests {
         let s = screen(&a, 70, 40);
         let at = |t: &str| s.iter().position(|l| l.starts_with(t)).unwrap_or_else(|| panic!("{t} in {s:#?}"));
         assert!(at("WORKING 1") < at("ENDED 1") && at("ENDED 1") < at("READY 1"));
-        assert!(s.iter().any(|l| l == "   [s] restart session  [⏎] open window"), "{s:#?}");
+        assert!(s.iter().any(|l| l == "   [s] restart session  [⏎] open window  [C] close out"), "{s:#?}");
         // replies are refused, with the way out
         press(&mut a, KeyCode::Char('1'));
         assert!(a.flash.contains("s restarts it"), "{}", a.flash);
@@ -838,7 +995,10 @@ pub mod tests {
         }
         assert_eq!(a.cur().map(|r| r.id.as_str()), Some("DEM-2"));
         let s = screen(&a, 70, 40);
-        assert!(s.iter().any(|l| l == "   [s] start  [S] start in background  [p] project  [l] meeting"), "{s:#?}");
+        assert!(
+            s.iter().any(|l| l.starts_with("   [s] start  [S] start in background  [p] project  [l] meeting")),
+            "{s:#?}"
+        );
         assert!(s.iter().any(|l| l == "do it"));
         // going past the end stays on the last row; k goes back
         press(&mut a, KeyCode::Char('j'));
@@ -922,7 +1082,7 @@ pub mod tests {
                 "  ▸ auth",
                 " ○ DEM-2  Ready one",
                 "     P1 · ▸ auth",
-                "   [s] start  [S] start in background  [g] cluster",
+                "   [s] start  [S] start in background  [g] cluster  [C] close out",
                 "  ▸ unsorted",
                 " ○ DEM-3  Polish",
                 "     P3",
@@ -933,7 +1093,7 @@ pub mod tests {
         press(&mut a, KeyCode::Char('j'));
         press(&mut a, KeyCode::Char('j'));
         assert_eq!(a.projects.cur().map(|r| r.key.as_str()), Some("DEM-1"));
-        assert!(screen(&a, 80, 40).iter().any(|l| l == "   [⏎] open session  [g] cluster"));
+        assert!(screen(&a, 80, 40).iter().any(|l| l == "   [⏎] open session  [g] cluster  [C] close out"));
         // ⏎ on a ticket with a live session opens it in the queue
         press(&mut a, KeyCode::Enter);
         assert_eq!((a.tab, a.sel_id.as_str()), (Tab::Queue, "s1"));
@@ -1010,7 +1170,8 @@ pub mod tests {
 
     #[test]
     fn settings_tab_lists_settings_and_connections() {
-        let a = with_settings();
+        let mut a = with_settings();
+        a.settings_state.sel = 1;
         let s = screen(&a, 80, 30);
         assert_eq!(
             &s[..20],
@@ -1018,6 +1179,8 @@ pub mod tests {
                 " queue   projects   settings   ⇥",
                 "",
                 " SETTINGS",
+                " Update   ·",
+                "   not checked yet",
                 " queue key  S-Escape",
                 "   tmux key that jumps back to the queue",
                 "   [⏎] edit  [r] default",
@@ -1033,32 +1196,30 @@ pub mod tests {
                 "     placeholder",
                 "",
                 "",
-                "",
-                "",
             ]
         );
-        assert_eq!(a.settings_slot_key(), "settings:0:\"S-Escape\"");
+        assert_eq!(a.settings_slot_key(), "settings:1:\"S-Escape\"");
     }
 
     #[test]
     fn settings_selection_walks_into_the_connections() {
         let mut a = with_settings();
-        for _ in 0..3 {
+        for _ in 0..4 {
             press(&mut a, KeyCode::Char('j'));
         }
-        assert_eq!(a.settings_state.sel, 3);
+        assert_eq!(a.settings_state.sel, 4);
         assert!(a.settings_slot_text().contains("Claude Code hooks"));
-        assert_eq!(a.settings_slot_key(), "settings:3:ok");
+        assert_eq!(a.settings_slot_key(), "settings:4:ok");
         for _ in 0..9 {
             press(&mut a, KeyCode::Char('j'));
         }
-        assert_eq!(a.settings_state.sel, 4, "stops at the last connection");
+        assert_eq!(a.settings_state.sel, 5, "stops at the last connection");
         // toggling a checkbox with the daemon away shows the refusal; the value is untouched
-        a.settings_state.sel = 1;
+        a.settings_state.sel = 2;
         press(&mut a, KeyCode::Enter);
         assert!(a.flash.contains("daemon not running"));
         // a number is edited inline
-        a.settings_state.sel = 2;
+        a.settings_state.sel = 3;
         press(&mut a, KeyCode::Enter);
         press(&mut a, KeyCode::Backspace);
         press(&mut a, KeyCode::Char('5'));
@@ -1083,5 +1244,216 @@ pub mod tests {
         assert_eq!(a.tab, Tab::Settings);
         press(&mut a, KeyCode::Char(','));
         assert_eq!(a.tab, Tab::Queue);
+    }
+
+    /// A daemon that records each request (path, JSON body) and answers with the next canned body.
+    fn recording(replies: Vec<&'static str>) -> (Api, std::sync::mpsc::Receiver<(String, Value)>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (body, s) in replies.into_iter().zip(l.incoming().flatten()) {
+                let mut r = BufReader::new(s);
+                let mut first = String::new();
+                r.read_line(&mut first).unwrap();
+                let mut len = 0;
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                }
+                let mut buf = vec![0; len];
+                r.read_exact(&mut buf).unwrap();
+                let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
+                let _ = tx.send((path, serde_json::from_slice(&buf).unwrap_or(Value::Null)));
+                let _ = write!(
+                    r.get_mut(),
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (Api::new(&url), rx)
+    }
+
+    fn type_text(a: &mut App, t: &str) {
+        for c in t.chars() {
+            press(a, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn close_out_picker_lists_wrap_up_first_and_enter_takes_it() {
+        let (api, rx) = recording(vec![
+            r#"{"ok":true,"mode":"wrap","msg":"asked DEM-1's session to wrap up; the window closes when it is done"}"#,
+        ]);
+        let mut a = app();
+        a.api = api;
+        press(&mut a, KeyCode::Char('C'));
+        let p = a.picker.as_ref().unwrap();
+        assert_eq!(p.title, "Close out DEM-1");
+        let labels: Vec<_> = p.items.iter().map(|i| (i.0.as_str(), i.1.as_str())).collect();
+        assert_eq!(
+            labels,
+            [
+                ("Wrap up and close", "wrap"),
+                ("Close now", "now"),
+                ("Close window, keep ticket", "keep"),
+                ("Drop ticket", "drop")
+            ]
+        );
+        assert!(screen(&a, 90, 30).iter().any(|l| l.contains("Wrap up and close")));
+        press(&mut a, KeyCode::Enter);
+        assert!(a.picker.is_none());
+        assert_eq!(a.flash, "asked DEM-1's session to wrap up; the window closes when it is done");
+        let (path, body) = rx.recv().unwrap();
+        assert_eq!(path, "/api/tools/ticket.close_out");
+        assert_eq!((body["key"].as_str(), body["mode"].as_str()), (Some("DEM-1"), Some("wrap")));
+    }
+
+    #[test]
+    fn a_refused_wrap_up_is_shown_not_marked() {
+        let (api, _rx) = recording(vec![
+            r#"{"ok":false,"refused":"the prompt already has text in it (\"fix\"): attach to send or clear it"}"#,
+        ]);
+        let mut a = app();
+        a.api = api;
+        press(&mut a, KeyCode::Char('C'));
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.flash, "not sent: the prompt already has text in it (\"fix\"): attach to send or clear it");
+    }
+
+    #[test]
+    fn close_now_asks_for_a_summary_the_others_act_at_once() {
+        let (api, rx) = recording(vec![
+            r#"{"ok":true,"msg":"closed DEM-1"}"#,
+            r#"{"ok":true,"msg":"DEM-1 back to todo, window closed"}"#,
+            r#"{"ok":true,"msg":"DEM-1 dropped"}"#,
+        ]);
+        let mut a = app();
+        a.api = api;
+        press(&mut a, KeyCode::Char('C'));
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.summary_input, Some(("DEM-1".into(), String::new())));
+        assert!(screen(&a, 70, 20).iter().any(|l| l.starts_with("summary for DEM-1 (may be empty) ›")));
+        type_text(&mut a, "all good");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.flash, "closed DEM-1");
+        let (_, body) = rx.recv().unwrap();
+        assert_eq!((body["mode"].as_str(), body["summary"].as_str()), (Some("now"), Some("all good")));
+        // esc cancels without calling anything
+        press(&mut a, KeyCode::Char('C'));
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Esc);
+        assert!(a.summary_input.is_none());
+        for (downs, mode) in [(2, "keep"), (3, "drop")] {
+            press(&mut a, KeyCode::Char('C'));
+            for _ in 0..downs {
+                press(&mut a, KeyCode::Down);
+            }
+            press(&mut a, KeyCode::Enter);
+            assert_eq!(rx.recv().unwrap().1["mode"], mode);
+        }
+        assert_eq!(a.flash, "DEM-1 dropped");
+    }
+
+    #[test]
+    fn exclamation_files_feedback_with_context_and_empty_files_the_last_error() {
+        let (api, rx) = recording(vec![
+            r#"{"key":"TIC-9","project":"ticket-cockpit","title":"x"}"#,
+            r#"{"key":"TIC-10","project":"ticket-cockpit","title":"Fix: y"}"#,
+        ]);
+        let mut a = app();
+        a.api = api;
+        press(&mut a, KeyCode::Char('!'));
+        assert!(screen(&a, 70, 20).iter().any(|l| l.starts_with("improve the cockpit ›")));
+        type_text(&mut a, "queue jumps");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.flash, "filed TIC-9");
+        let (path, body) = rx.recv().unwrap();
+        assert_eq!(path, "/api/tools/cockpit.feedback");
+        assert_eq!(body["text"], "queue jumps");
+        assert_eq!(body["context"]["tab"], "Queue");
+        assert!(body["context"]["selected"].as_str().unwrap().starts_with("DEM-1"), "{body}");
+        press(&mut a, KeyCode::Char('!'));
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(rx.recv().unwrap().1["text"], "");
+        assert_eq!(a.flash, "filed TIC-10");
+        // while typing a reply, ! is just a character
+        press(&mut a, KeyCode::Char('r'));
+        press(&mut a, KeyCode::Char('!'));
+        assert!(a.fb_input.is_none() && a.input.as_deref() == Some("!"));
+    }
+
+    #[test]
+    fn reload_and_update_ask_first() {
+        let (api, rx) = recording(vec![r#"{"window":"cockpit:cockpit-update"}"#]);
+        let mut a = app();
+        a.api = api;
+        press(&mut a, KeyCode::Char('R'));
+        let f = screen(&a, 120, 20);
+        assert!(
+            f.iter().any(|l| l.trim()
+                == "Reload the cockpit (restart the daemon, replace the queue with the installed binary)? (y/n)"),
+            "{f:#?}"
+        );
+        press(&mut a, KeyCode::Char('n'));
+        assert_eq!(a.flash, "cancelled");
+        a.flash.clear();
+        a.settings.push(json!({"key": "update_channel", "value": "release"}));
+        press(&mut a, KeyCode::Char('U'));
+        let f = screen(&a, 120, 20);
+        assert!(
+            f.iter()
+                .any(|l| l.trim()
+                    == "Update the cockpit (release)? It builds/downloads in a window, then reloads. (y/n)"),
+            "{f:#?}"
+        );
+        press(&mut a, KeyCode::Char('y'));
+        assert_eq!(a.flash, "running in the cockpit-update window");
+        assert_eq!(rx.recv().unwrap().0, "/api/tools/cockpit.update");
+    }
+
+    #[test]
+    fn the_footer_recommends_an_update_but_a_flash_wins() {
+        let mut a = app();
+        assert!(screen(&a, 90, 30).iter().any(|l| l == "⇥ tabs · ? all keys · q leave"));
+        a.update = json!({"channel": "local", "available": "abc123", "commits_ahead": 3});
+        assert!(screen(&a, 90, 30).iter().any(|l| l == "update available: 3 commits · U to update"));
+        a.update = json!({"channel": "local", "available": "abc123", "commits_ahead": 1});
+        assert!(screen(&a, 90, 30).iter().any(|l| l == "update available: 1 commit · U to update"));
+        a.update = json!({"channel": "release", "available": "v0.3.0", "commits_ahead": null});
+        assert!(screen(&a, 90, 30).iter().any(|l| l == "update available: v0.3.0 · U to update"));
+        a.flash = "no ticket on this row".into();
+        let f = screen(&a, 90, 30);
+        assert!(
+            f.iter().any(|l| l == "no ticket on this row") && !f.iter().any(|l| l.contains("update available")),
+            "{f:#?}"
+        );
+    }
+
+    #[test]
+    fn the_settings_tab_opens_on_the_update_entry() {
+        let mut a = with_settings();
+        a.update = json!({"channel": "local", "installed": "0.1.0 (dc34153)", "available": "abc123", "commits_ahead": 2,
+            "behind_remote": 0, "summary": "update available: 2 commits", "notes": "abc123 second\ndef456 first"});
+        let s = screen(&a, 100, 30);
+        assert!(s.iter().any(|l| l.starts_with(" Update  local · 0.1.0 (dc34153)")), "{s:#?}");
+        assert!(s.iter().any(|l| l.contains("update available: 2 commits")));
+        assert!(s.iter().any(|l| l.starts_with("   [U] update  [R] reload")), "chips under the selected entry: {s:#?}");
+        assert!(a.settings_slot_text().contains("abc123 second") && a.settings_slot_text().contains("Commits"));
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.confirm, Some(Confirm::Update));
+        // release channel lists the notes under their own heading
+        a.update = json!({"channel": "release", "installed": "0.2.0 (aaa)", "available": "v0.3.0", "summary": "update available: v0.3.0", "notes": "- fixed it"});
+        assert!(a.settings_slot_text().contains("Release notes") && a.settings_slot_text().contains("- fixed it"));
     }
 }
