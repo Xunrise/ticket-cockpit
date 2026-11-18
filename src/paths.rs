@@ -11,9 +11,7 @@ pub fn data_dir() -> PathBuf {
 }
 
 pub fn db_path() -> PathBuf {
-    std::env::var_os("COCKPIT_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir().join("cockpit.db"))
+    std::env::var_os("COCKPIT_DB").map(PathBuf::from).unwrap_or_else(|| data_dir().join("cockpit.db"))
 }
 
 /// Saved meeting notes and other linked context files.

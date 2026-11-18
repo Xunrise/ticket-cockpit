@@ -51,28 +51,18 @@ pub const DEFS: &[Def] = &[
 ];
 
 fn def(key: &str) -> Result<&'static Def> {
-    DEFS.iter()
-        .find(|d| d.key == key)
-        .ok_or_else(|| anyhow!("no setting {key}"))
+    DEFS.iter().find(|d| d.key == key).ok_or_else(|| anyhow!("no setting {key}"))
 }
 
 pub fn get(conn: &Connection, key: &str) -> Result<Value> {
     let d = def(key)?;
-    let raw: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key=?", [key], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    Ok(raw
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(d.default))
+    let raw: Option<String> =
+        conn.query_row("SELECT value FROM settings WHERE key=?", [key], |r| r.get(0)).optional()?;
+    Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(d.default))
 }
 
 pub fn get_bool(conn: &Connection, key: &str) -> bool {
-    get(conn, key)
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    get(conn, key).ok().and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 pub fn get_i64(conn: &Connection, key: &str) -> i64 {
@@ -91,9 +81,7 @@ pub fn parse_quick_replies(s: &str) -> Result<Vec<(String, String)>> {
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(|p| {
-            let (k, t) = p
-                .split_once('=')
-                .ok_or_else(|| anyhow!("quick reply '{p}' needs key=text"))?;
+            let (k, t) = p.split_once('=').ok_or_else(|| anyhow!("quick reply '{p}' needs key=text"))?;
             let (k, t) = (k.trim(), t.trim());
             if k.chars().count() != 1 || k.chars().any(char::is_whitespace) || t.is_empty() {
                 bail!("quick reply '{p}': the key is one character and the text is not empty");
@@ -104,19 +92,14 @@ pub fn parse_quick_replies(s: &str) -> Result<Vec<(String, String)>> {
 }
 
 pub fn quick_replies(conn: &Connection) -> Vec<(String, String)> {
-    get(conn, "quick_replies")
-        .ok()
-        .and_then(|v| parse_quick_replies(v.as_str()?).ok())
-        .unwrap_or_default()
+    get(conn, "quick_replies").ok().and_then(|v| parse_quick_replies(v.as_str()?).ok()).unwrap_or_default()
 }
 
 fn validate(key: &str, value: &Value) -> Result<()> {
     let default = (def(key)?.default)();
     let same_type = matches!(
         (&default, value),
-        (Value::Bool(_), Value::Bool(_))
-            | (Value::String(_), Value::String(_))
-            | (Value::Number(_), Value::Number(_))
+        (Value::Bool(_), Value::Bool(_)) | (Value::String(_), Value::String(_)) | (Value::Number(_), Value::Number(_))
     );
     if !same_type {
         let want = match default {
@@ -128,9 +111,7 @@ fn validate(key: &str, value: &Value) -> Result<()> {
     }
     match key {
         "queue_width" => {
-            let n = value
-                .as_i64()
-                .ok_or_else(|| anyhow!("queue_width expects a whole number"))?;
+            let n = value.as_i64().ok_or_else(|| anyhow!("queue_width expects a whole number"))?;
             if !(10..=90).contains(&n) {
                 bail!("queue_width must be between 10 and 90");
             }
@@ -194,10 +175,7 @@ mod tests {
         assert!(set(&c, "quick_replies", &json!("ab=x")).is_err());
         assert!(set(&c, "quick_replies", &json!("a")).is_err());
         set(&c, "quick_replies", &json!("o=ok; n=no thanks")).unwrap();
-        assert_eq!(
-            quick_replies(&c),
-            vec![("o".into(), "ok".into()), ("n".into(), "no thanks".into())]
-        );
+        assert_eq!(quick_replies(&c), vec![("o".into(), "ok".into()), ("n".into(), "no thanks".into())]);
     }
 
     #[test]
@@ -205,8 +183,6 @@ mod tests {
         let (_d, c) = temp_db();
         let v = all(&c).unwrap();
         assert_eq!(v.len(), 6);
-        assert!(v
-            .iter()
-            .all(|s| !s["help"].as_str().unwrap().is_empty() && s["value"] == s["default"]));
+        assert!(v.iter().all(|s| !s["help"].as_str().unwrap().is_empty() && s["value"] == s["default"]));
     }
 }

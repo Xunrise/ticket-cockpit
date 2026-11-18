@@ -14,10 +14,7 @@ pub struct Service {
 }
 
 pub fn exists(conn: &Connection, name: &str) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT 1 FROM projects WHERE name=?", [name], |_| Ok(()))
-        .optional()?
-        .is_some())
+    Ok(conn.query_row("SELECT 1 FROM projects WHERE name=?", [name], |_| Ok(())).optional()?.is_some())
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<Value>> {
@@ -42,14 +39,7 @@ pub fn link_palaver(conn: &Connection, project: &str, palaver: &str) -> Result<(
 }
 
 pub fn palaver_of(conn: &Connection, project: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT palaver FROM projects WHERE name=?",
-            [project],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten())
+    Ok(conn.query_row("SELECT palaver FROM projects WHERE name=?", [project], |r| r.get(0)).optional()?.flatten())
 }
 
 pub fn set_services(conn: &Connection, project: &str, services: &[Service]) -> Result<()> {
@@ -61,18 +51,9 @@ pub fn set_services(conn: &Connection, project: &str, services: &[Service]) -> R
 }
 
 pub fn services(conn: &Connection, project: &str) -> Result<Vec<Service>> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT services FROM projects WHERE name=?",
-            [project],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(raw
-        .map(|s| serde_json::from_str(&s))
-        .transpose()?
-        .unwrap_or_default())
+    let raw: Option<String> =
+        conn.query_row("SELECT services FROM projects WHERE name=?", [project], |r| r.get(0)).optional()?.flatten();
+    Ok(raw.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default())
 }
 
 /// The repo holding most of the project's tickets.
@@ -104,15 +85,8 @@ pub fn overview(conn: &Connection, project: &str, live_sessions: &[Value]) -> Re
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("no project {project}"))?;
-    let all: Vec<Ticket> = tickets::all(conn)?
-        .into_iter()
-        .filter(|t| t.project.as_deref() == Some(project))
-        .collect();
-    let mut todo: Vec<Ticket> = all
-        .iter()
-        .filter(|t| t.status == "todo" || t.status == "backlog")
-        .cloned()
-        .collect();
+    let all: Vec<Ticket> = tickets::all(conn)?.into_iter().filter(|t| t.project.as_deref() == Some(project)).collect();
+    let mut todo: Vec<Ticket> = all.iter().filter(|t| t.status == "todo" || t.status == "backlog").cloned().collect();
     sort_planned(&mut todo);
     let doing: Vec<&Ticket> = all.iter().filter(|t| t.status == "doing").collect();
     let mut done: Vec<&Ticket> = all.iter().filter(|t| t.status == "done").collect();
@@ -138,12 +112,7 @@ mod tests {
     use crate::tickets::{create, update, NewTicket};
 
     fn nt(title: &str, project: &str) -> NewTicket {
-        NewTicket {
-            repo: "r".into(),
-            title: title.into(),
-            project: Some(project.into()),
-            ..Default::default()
-        }
+        NewTicket { repo: "r".into(), title: title.into(), project: Some(project.into()), ..Default::default() }
     }
 
     #[test]
@@ -159,18 +128,9 @@ mod tests {
         set(&b, json!({"cluster": "alpha"}));
         set(&d, json!({"status": "doing"}));
         set(&e, json!({"status": "done"}));
-        let o = overview(
-            &c,
-            "P",
-            &[json!({"project":"P","key":"x"}), json!({"project":"Q"})],
-        )
-        .unwrap();
-        let todo: Vec<_> = o["todo"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["key"].as_str().unwrap().to_string())
-            .collect();
+        let o = overview(&c, "P", &[json!({"project":"P","key":"x"}), json!({"project":"Q"})]).unwrap();
+        let todo: Vec<_> =
+            o["todo"].as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap().to_string()).collect();
         assert_eq!(todo, vec![b, a]);
         assert_eq!(o["clusters"], json!(["alpha", "zeta"]));
         assert_eq!(o["doing"].as_array().unwrap().len(), 1);
@@ -201,20 +161,13 @@ mod tests {
             })
             .collect();
         sort_planned(&mut v);
-        assert_eq!(
-            v.iter().map(|t| t.key.as_str()).collect::<Vec<_>>(),
-            ["K-2", "K-0", "K-1"]
-        );
+        assert_eq!(v.iter().map(|t| t.key.as_str()).collect::<Vec<_>>(), ["K-2", "K-0", "K-1"]);
     }
 
     #[test]
     fn services_and_palaver_link_roundtrip() {
         let (_d, c) = temp_db();
-        let sv = vec![Service {
-            name: "api".into(),
-            cmd: "npm run api".into(),
-            cwd: Some("server".into()),
-        }];
+        let sv = vec![Service { name: "api".into(), cmd: "npm run api".into(), cwd: Some("server".into()) }];
         set_services(&c, "P", &sv).unwrap();
         link_palaver(&c, "P", "Palaver P").unwrap();
         assert_eq!(services(&c, "P").unwrap(), sv);

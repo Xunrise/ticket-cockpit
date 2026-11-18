@@ -1,7 +1,9 @@
 pub mod cli;
 pub mod db;
+pub mod panes;
 pub mod paths;
 pub mod projects;
 pub mod settings;
 pub mod tickets;
+pub mod tmux;
 pub mod util;

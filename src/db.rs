@@ -37,10 +37,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 pub fn migrate(conn: &Connection) -> Result<()> {
     let have: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(have) {
-        conn.execute_batch(&format!(
-            "BEGIN;{sql};PRAGMA user_version={};COMMIT;",
-            i + 1
-        ))?;
+        conn.execute_batch(&format!("BEGIN;{sql};PRAGMA user_version={};COMMIT;", i + 1))?;
     }
     Ok(())
 }
@@ -91,13 +88,9 @@ mod tests {
     #[test]
     fn migrates_once_and_uses_wal() {
         let (d, c) = temp_db();
-        let v: usize = c
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap();
+        let v: usize = c.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(v, MIGRATIONS.len());
-        let mode: String = c
-            .pragma_query_value(None, "journal_mode", |r| r.get(0))
-            .unwrap();
+        let mode: String = c.pragma_query_value(None, "journal_mode", |r| r.get(0)).unwrap();
         assert_eq!(mode, "wal");
         drop(c);
         open(&d.path().join("t.db")).unwrap(); // reopening is a no-op
@@ -105,11 +98,7 @@ mod tests {
 }
 
 /// Runs a query and returns every row as a JSON object keyed by column name.
-pub fn rows(
-    conn: &Connection,
-    sql: &str,
-    params: impl rusqlite::Params,
-) -> Result<Vec<serde_json::Value>> {
+pub fn rows(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<serde_json::Value>> {
     use rusqlite::types::ValueRef;
     let mut st = conn.prepare(sql)?;
     let names: Vec<String> = st.column_names().iter().map(|s| s.to_string()).collect();
