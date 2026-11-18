@@ -1,0 +1,105 @@
+//! SQLite access: WAL so the hook (a separate process) and the daemon write concurrently,
+//! plus versioned migrations through `PRAGMA user_version`.
+use anyhow::Result;
+use rusqlite::Connection;
+use std::path::Path;
+
+const MIGRATIONS: &[&str] = &[
+    // v1
+    "CREATE TABLE tickets(key TEXT PRIMARY KEY, repo TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+       status TEXT NOT NULL DEFAULT 'todo', priority INTEGER NOT NULL DEFAULT 3, project TEXT, cluster TEXT, blocked_by TEXT,
+       session TEXT, rank REAL NOT NULL DEFAULT 0, created TEXT NOT NULL, updated TEXT NOT NULL);
+     CREATE INDEX tickets_project ON tickets(project);
+     CREATE TABLE sessions(id TEXT PRIMARY KEY, repo TEXT, cwd TEXT, started TEXT, last_seen TEXT, ended TEXT,
+       head_start TEXT, head_end TEXT, tmux_pane TEXT, state TEXT, state_detail TEXT, state_at TEXT,
+       transcript TEXT, last_message TEXT, last_prompt TEXT, trail TEXT);
+     CREATE TABLE events(id INTEGER PRIMARY KEY, ticket TEXT, session TEXT, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', at TEXT NOT NULL);
+     CREATE INDEX events_ticket ON events(ticket);
+     CREATE TABLE repos(name TEXT PRIMARY KEY, path TEXT NOT NULL);
+     CREATE TABLE projects(name TEXT PRIMARY KEY, palaver TEXT, services TEXT);
+     CREATE TABLE prompts(session TEXT NOT NULL, at TEXT NOT NULL);
+     CREATE INDEX prompts_at ON prompts(at);
+     CREATE TABLE links(ticket TEXT, kind TEXT, ref TEXT, title TEXT, path TEXT, why TEXT, at TEXT, PRIMARY KEY(ticket, kind, ref));
+     CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+];
+
+pub fn open(path: &Path) -> Result<Connection> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_millis(2000))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+pub fn migrate(conn: &Connection) -> Result<()> {
+    let have: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(have) {
+        conn.execute_batch(&format!(
+            "BEGIN;{sql};PRAGMA user_version={};COMMIT;",
+            i + 1
+        ))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn temp_db() -> (tempdir::Dir, Connection) {
+    let d = tempdir::Dir::new();
+    let c = open(&d.path().join("t.db")).unwrap();
+    (d, c)
+}
+
+#[cfg(test)]
+pub mod tempdir {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    pub struct Dir(PathBuf);
+
+    #[allow(clippy::new_without_default)]
+    impl Dir {
+        pub fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "cockpit-t-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Dir(p)
+        }
+        pub fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_once_and_uses_wal() {
+        let (d, c) = temp_db();
+        let v: usize = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, MIGRATIONS.len());
+        let mode: String = c
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        drop(c);
+        open(&d.path().join("t.db")).unwrap(); // reopening is a no-op
+    }
+}
