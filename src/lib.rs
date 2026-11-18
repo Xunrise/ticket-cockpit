@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod db;
+pub mod palaver;
 pub mod panes;
 pub mod paths;
 pub mod projects;

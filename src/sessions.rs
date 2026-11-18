@@ -228,6 +228,14 @@ pub fn context_text(env: &HookEnv, sid: &str, issue: Option<&tickets::Ticket>, o
     t
 }
 
+/// The session's tmux pane, when it still exists.
+pub fn live_pane(conn: &Connection, tmux: &Tmux, sid: &str) -> Option<PaneRef> {
+    let pane: Option<String> =
+        conn.query_row("SELECT tmux_pane FROM sessions WHERE id=?", [sid], |r| r.get(0)).optional().ok()??;
+    let p = PaneRef::parse(&pane?).ok()?;
+    tmux.pane_alive(&p).then_some(p)
+}
+
 /// Entry point for `cockpit hook`: never fails, never blocks a session.
 pub fn run_hook(stdin: &str) {
     let result = std::panic::catch_unwind(|| -> Result<String> {
