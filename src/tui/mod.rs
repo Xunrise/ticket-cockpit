@@ -85,3 +85,12 @@ fn run_queue(tmux: Tmux) -> Result<()> {
     ratatui::restore();
     result
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn embedded_tmux_config_is_the_cockpits_own() {
+        assert!(super::TMUX_CONF.contains("set -g status off"));
+        assert!(super::TMUX_CONF.contains("set -g extended-keys on"));
+    }
+}

@@ -160,6 +160,10 @@ impl Travel {
             self.at_win = want.clone();
             self.border_label.clear();
         }
+        // picking another row ends the stay on a window without a row of its own
+        if self.pinned.as_deref() != Some(sel_id) {
+            self.pinned = None;
+        }
         self.shown = pane.filter(|_| want == self.at_win && self.at_win != self.home_win);
         if let Some(r) = focus.filter(|_| self.shown.is_some()) {
             let label = window_label(&r.label, &border_hints(r, replies));
@@ -365,6 +369,9 @@ mod tests {
         assert!(tr.shown.is_none());
         tr.sync(Some(&rows[0]), &rows, "a", false, 38, &q);
         assert_eq!(win_of(&me), win_of(&p1));
+        // and going back to the row that was pinned travels again
+        tr.sync(Some(&rows[1]), &rows, "b", false, 38, &q);
+        assert_eq!(win_of(&me), win_of(&p2));
 
         // @tk_select from cogitator's bar
         t.run(CK, &["set", "-g", "@tk_select", "b"]).unwrap();
