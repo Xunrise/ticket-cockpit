@@ -1,0 +1,13 @@
+[39m❯[0m earlier message from the user
+
+● Done. The tests pass and the change is committed.
+
+[2m──────────────────────────────────────────────────────────────────────────────[0m
+ [1mWhich database should we use?[22m
+
+ [36m❯ 1. Postgres[39m
+   2. SQLite
+   3. Type something.
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel
+[2m──────────────────────────────────────────────────────────────────────────────[0m

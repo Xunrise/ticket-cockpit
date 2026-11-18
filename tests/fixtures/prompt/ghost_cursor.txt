@@ -1,0 +1,8 @@
+[39m❯[0m earlier message from the user
+
+● Done. The tests pass and the change is committed.
+
+[2m──────────────────────────────────────────────────────────────────────────────[0m
+[39m❯[0m [7mr[27m[2mun the tests[0m
+[2m──────────────────────────────────────────────────────────────────────────────[0m
+  ? for shortcuts
