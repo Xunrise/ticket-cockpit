@@ -45,6 +45,19 @@ fn render(v: &Value, original: &str) -> Result<String> {
     let fmt = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
     serde::Serialize::serialize(v, &mut serde_json::Serializer::with_formatter(&mut buf, fmt))?;
     let mut s = String::from_utf8(buf)?;
+    // a file that spells non-ASCII as \uXXXX (and has none raw) keeps doing so, so untouched lines stay byte-identical
+    if original.is_ascii() && original.contains("\\u") {
+        s = s.chars().fold(String::new(), |mut o, c| {
+            if c.is_ascii() {
+                o.push(c);
+            } else {
+                for u in c.encode_utf16(&mut [0; 2]) {
+                    o += &format!("\\u{u:04x}");
+                }
+            }
+            o
+        });
+    }
     if original.ends_with('\n') || original.is_empty() {
         s.push('\n');
     }
@@ -377,6 +390,15 @@ mod tests {
         assert_eq!(v["hooks"].as_object().unwrap().keys().collect::<Vec<_>>()[..2], ["Stop", "PostToolUseFailure"]);
         assert!(out.starts_with("{\n    \"model\""), "indent of the original is kept");
         assert!(out.ends_with("}\n"));
+    }
+
+    #[test]
+    fn unicode_escapes_of_the_original_are_kept() {
+        let text = "{\n  \"a\": \"x \\u2014 y \\ud83d\\ude00\"\n}\n";
+        let (out, _) = install_hooks(text, EXE).unwrap();
+        assert!(out.starts_with(&text[..text.len() - 3]), "{out}");
+        let (raw, _) = install_hooks("{\"a\": \"\u{2014}\"}", EXE).unwrap();
+        assert!(raw.contains('\u{2014}'));
     }
 
     #[test]
