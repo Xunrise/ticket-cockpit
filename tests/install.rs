@@ -26,8 +26,14 @@ impl Env {
     }
 
     fn run(&self, args: &[&str]) -> (bool, String) {
+        self.run_on(args, "1")
+    }
+
+    /// `COCKPIT_PORT` is the daemon the install asks about its build; port 1 has none.
+    fn run_on(&self, args: &[&str], port: &str) -> (bool, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_cockpit"))
             .args(args)
+            .env("COCKPIT_PORT", port)
             .env("HOME", &self.home)
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env_remove("COCKPIT_DB")
@@ -124,4 +130,63 @@ fn unusable_settings_are_left_alone() {
     let (ok, out) = e.run(&["install"]);
     assert!(!ok && out.contains("left untouched"), "{out}");
     assert_eq!(std::fs::read_to_string(e.settings()).unwrap(), "{ nope");
+}
+
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn install_restarts_a_daemon_of_another_build() {
+    let e = Env::new("build");
+    std::fs::write(e.settings(), SETTINGS).unwrap();
+    let (ok, out) = e.run(&["install"]);
+    assert!(ok, "{out}");
+
+    // a daemon that claims to be an older build, on a free private port
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    let _d = Daemon(
+        Command::new(env!("CARGO_BIN_EXE_cockpit"))
+            .args(["daemon", "run", "--port", &port])
+            .env("HOME", &e.home)
+            .env("COCKPIT_DB", e.home.join("cockpit.db"))
+            .env("COCKPIT_TMUX_SOCKET", format!("cockpit-test-install-{port}"))
+            .env("COCKPIT_BUILD", "old-build")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let status = || {
+        Command::new(env!("CARGO_BIN_EXE_cockpit"))
+            .args(["daemon", "status", "--port", &port])
+            .env("HOME", &e.home)
+            .output()
+            .unwrap()
+    };
+    let mut up = false;
+    for _ in 0..100 {
+        up = status().status.success();
+        if up {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(up, "the test daemon answers");
+    let out = String::from_utf8_lossy(&status().stdout).into_owned();
+    assert!(out.contains("build    old-build"), "{out}");
+
+    let kicks = |e: &Env| e.launchctl_log().matches("kickstart -k").count();
+    let (ok, out) = e.run_on(&["install"], &port);
+    assert!(ok, "{out}");
+    assert!(out.contains("runs another build (old-build), restarting it"), "{out}");
+    assert_eq!(kicks(&e), 1, "{}", e.launchctl_log());
+
+    // nothing running on the asked port: nothing to restart
+    let (ok, out) = e.run(&["install"]);
+    assert!(ok && out.contains("up to date") && kicks(&e) == 1, "{out}");
 }

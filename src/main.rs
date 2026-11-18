@@ -1,6 +1,7 @@
 use cockpit::{cli, daemon};
 
 fn main() {
+    cockpit::util::build_id(); // before anything can replace the binary on disk
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match run(args) {
         Ok(()) => 0,

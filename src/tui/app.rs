@@ -49,6 +49,8 @@ pub struct App {
     pub show_help: bool,
     /// Set while the daemon does not answer.
     pub down: Option<String>,
+    /// The daemon is another build than this queue: shown as a one-line notice.
+    pub stale_daemon: bool,
     /// Refresh on the next loop turn (after an action).
     pub refresh: bool,
     pub quit: bool,
@@ -81,6 +83,7 @@ impl App {
             picker: None,
             show_help: false,
             down: None,
+            stale_daemon: false,
             refresh: true,
             quit: false,
             now: now_secs(),
@@ -121,6 +124,9 @@ impl App {
         match self.api.get("/api/state") {
             Ok(st) => {
                 self.down = None;
+                if let Ok(h) = self.api.get("/api/health") {
+                    self.stale_daemon = h["build"].as_str() != Some(crate::util::build_id().as_str());
+                }
                 self.load_state(&st);
                 if let Ok(s) = self.tool("settings.get", json!({})) {
                     self.settings = s.as_array().cloned().unwrap_or_default();
@@ -628,6 +634,9 @@ impl App {
             })
             .dim();
         }
+        if self.stale_daemon {
+            return Line::from(" daemon is a different build: cockpit daemon restart").yellow();
+        }
         Line::from(" ⇥ tabs · ? all keys · q leave").dim()
     }
 }
@@ -699,6 +708,20 @@ pub mod tests {
         // replies are refused, with the way out
         press(&mut a, KeyCode::Char('1'));
         assert!(a.flash.contains("s restarts it"), "{}", a.flash);
+    }
+
+    #[test]
+    fn a_daemon_of_another_build_shows_a_notice_but_keeps_the_queue() {
+        let mut a = app();
+        let s = screen(&a, 70, 30);
+        assert!(!s.iter().any(|l| l.contains("different build")));
+        a.stale_daemon = true;
+        let s = screen(&a, 70, 30);
+        assert!(s.iter().any(|l| l == "daemon is a different build: cockpit daemon restart"), "{s:#?}");
+        assert!(s.iter().any(|l| l.starts_with("NEEDS YOU")), "the queue is still drawn");
+        // a flash (a failed tool) still wins the line
+        a.flash = "no ticket DEM-9".into();
+        assert!(screen(&a, 70, 30).iter().any(|l| l == "no ticket DEM-9"));
     }
 
     #[test]

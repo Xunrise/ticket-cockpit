@@ -66,6 +66,8 @@ impl Travel {
             )
             .map_err(|e| anyhow!("cannot open the slot pane: {e}"))?;
         let _ = tmux.run(CK, &["set", "-p", "-t", me, "@tk_queue", "1"]);
+        // the launcher compares this with its own build to replace a queue left over from an older one
+        let _ = tmux.run(CK, &["set", "-p", "-t", me, "@tk_build", &crate::util::build_id()]);
         let home_win = tmux.quiet(CK, &["display", "-p", "-t", me, "#{window_id}"]);
         let t = Travel {
             tmux,
@@ -334,6 +336,10 @@ mod tests {
         let mut tr = Travel::start(t.clone(), &me).unwrap();
         assert_eq!(t.quiet(CK, &["display", "-p", "-t", &me, "#{window_name}"]), HOME_WINDOW);
         let home = tr.home_win().to_string();
+        assert_eq!(
+            t.quiet(CK, &["display", "-p", "-t", &me, "#{@tk_queue}-#{@tk_build}"]),
+            format!("1-{}", crate::util::build_id())
+        );
         let q = [('c', "continue".to_string())];
 
         // selecting a row joins the queue to its window, on the left, full height

@@ -3,6 +3,28 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Identity of the running binary: modification time and size of the executable, read once at startup.
+/// A rebuilt or reinstalled binary gets a new one, so a long-running daemon or queue can tell it is out of date.
+/// `COCKPIT_BUILD` overrides it (tests).
+pub fn build_id() -> String {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        if let Some(b) = std::env::var("COCKPIT_BUILD").ok().filter(|b| !b.is_empty()) {
+            return b;
+        }
+        let meta = std::env::current_exe().and_then(std::fs::metadata);
+        match meta {
+            Ok(m) => {
+                let mtime =
+                    m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+                format!("{mtime}-{}", m.len())
+            }
+            Err(_) => "unknown".into(),
+        }
+    })
+    .clone()
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }

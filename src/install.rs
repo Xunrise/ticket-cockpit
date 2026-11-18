@@ -293,7 +293,15 @@ pub fn install(dry: bool) -> Result<()> {
     };
     match (loaded, st) {
         (true, "unchanged") => {
-            say(dry, format!("launchd agent {LABEL}: already loaded (`cockpit daemon restart` picks up a new binary)"))
+            // COCKPIT_PORT moves the daemon the check asks (tests)
+            let port = std::env::var("COCKPIT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(daemon::DEFAULT_PORT);
+            match daemon::running_build(port).filter(|b| *b != crate::util::build_id()) {
+                Some(old) => {
+                    say(dry, format!("launchd agent {LABEL}: the daemon runs another build ({old}), restarting it"));
+                    agent(&[&["kickstart", "-k", &target]]);
+                }
+                None => say(dry, format!("launchd agent {LABEL}: already loaded, daemon is up to date")),
+            }
         }
         (true, _) => {
             agent(&[&["bootout", &target], &["bootstrap", &daemon::domain(), &plist_arg], &["kickstart", &target]])

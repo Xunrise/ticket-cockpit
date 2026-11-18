@@ -58,6 +58,11 @@ fn health(port: u16) -> Option<Value> {
     serde_json::from_str(&http_get(&format!("127.0.0.1:{port}"), "/api/health", Duration::from_millis(800))?).ok()
 }
 
+/// The build id of the daemon answering on `port` ("unknown" for one that predates build ids); `None` when none runs.
+pub fn running_build(port: u16) -> Option<String> {
+    health(port).map(|h| h["build"].as_str().unwrap_or("unknown").to_string())
+}
+
 fn installed() -> bool {
     paths::launch_agent_plist().exists()
 }
@@ -87,7 +92,7 @@ pub fn status(port: u16) -> Value {
     let agent_pid = launchctl(&["print", &target()]).ok().and_then(|o| parse_pid(&o));
     match health(port) {
         Some(h) => {
-            json!({"running": true, "pid": h["pid"], "port": h["port"], "db": h["db"], "uptime_s": h["uptime_s"], "started": h["started"], "agent_installed": installed()})
+            json!({"running": true, "pid": h["pid"], "port": h["port"], "db": h["db"], "uptime_s": h["uptime_s"], "started": h["started"], "build": h["build"], "agent_installed": installed()})
         }
         None => {
             json!({"running": false, "pid": agent_pid, "port": port, "db": paths::db_path(), "uptime_s": null, "agent_installed": installed()})
@@ -106,6 +111,7 @@ fn print_status(s: &Value, as_json: bool) {
         println!("port     {}", s["port"]);
         println!("db       {}", s["db"].as_str().unwrap_or(""));
         println!("uptime   {}", format_uptime(s["uptime_s"].as_i64().unwrap_or(0)));
+        println!("build    {}", s["build"].as_str().unwrap_or("unknown (older than build ids)"));
     } else {
         println!("cockpit daemon: not running (nothing answers on port {})", s["port"]);
         println!("db       {}", s["db"].as_str().unwrap_or(""));
@@ -234,6 +240,9 @@ mod tests {
         let h = health(port).expect("daemon answers");
         assert_eq!(h["port"], port);
         assert_eq!(h["pid"], std::process::id());
+        assert_eq!(h["build"], crate::util::build_id());
+        assert_eq!(running_build(port), Some(crate::util::build_id()));
+        assert_eq!(status(port)["build"], crate::util::build_id());
         let s = status(port);
         assert_eq!((s["running"].as_bool(), s["port"].as_u64()), (Some(true), Some(port as u64)));
         // the Host header the client sends (localhost:<port>) passes the guard

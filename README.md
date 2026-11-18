@@ -3,7 +3,7 @@
 Local hub for tickets, projects, Claude sessions and terminals. One binary, one SQLite file, a background daemon and a terminal UI that runs in its own tmux server. macOS and tmux required.
 
 - Every Claude session, wherever it runs, reports its state through global hooks: working, needs you, your turn, ended.
-- The queue lists what needs you first, then your turn, working sessions and ready tickets. You answer sessions from the queue.
+- The queue lists what needs you first, then your turn, working sessions, ENDED tickets (in progress, window still open, Claude gone) and ready tickets. You answer sessions from the queue.
 - Tickets belong to projects; projects carry a Palaver link and default dev-server panes.
 - Claude sessions use the same tools through `cockpit tool`.
 
@@ -53,7 +53,7 @@ cockpit         # outside tmux: attach to (or create) the cockpit session; insid
 | `1`-`4`, `a`, `x` | pick an option of a question, accept, interrupt |
 | `r` | type a reply to the session |
 | quick-reply keys | send a canned reply (setting `quick_replies`, default `c=continue; y=yes; t=try again; m=merge it; d=start the dev server`) |
-| `s` | start a session for a ready ticket |
+| `s` | start a session for a ready ticket; on an ENDED row restart Claude in its window; on a running one, go there |
 | `p`, `l` | set the ticket's project; link a Palaver meeting as context |
 
 Replies are only sent when the prompt is empty (or shows Claude's grey suggestion) and no question is open; the cockpit checks the pane before and after and tells you when a draft of yours is in the way.
@@ -71,7 +71,7 @@ Replies are only sent when the prompt is empty (or shows Claude's grey suggestio
 ## Daemon
 
 ```sh
-cockpit daemon status     # running, pid, port, db, uptime (exit 1 when not running)
+cockpit daemon status     # running, pid, port, db, uptime, build (exit 1 when not running)
 cockpit daemon start | stop | restart
 cockpit daemon logs [--n 100] [--follow]
 cockpit daemon run        # in the foreground, what launchd starts (--port N, default 4747)

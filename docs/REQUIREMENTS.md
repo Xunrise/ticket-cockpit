@@ -61,7 +61,7 @@ Derived from the prototype in `ticket-cockpit-proto/` (Node daemon `tk.mjs`, Rus
 
 ### Queue tab
 
-- Sections NEEDS YOU, YOUR TURN (longest wait first), WORKING (most recent first), READY (rank order).
+- Sections NEEDS YOU, YOUR TURN (longest wait first), WORKING (most recent first), ENDED (doing tickets whose window exists but whose Claude session is not live; chips `[s] restart session  [⏎] open window`), READY (rank order).
 - Rows: ticket key + title (sessions without a ticket: their cockpit window name, else repo · branch), time in state, then repo · branch · tmux location · ◆ project.
 - The selected row shows its hotkeys underneath (e.g. `[⏎] attach [1-4] pick [a] accept [r] reply [x] interrupt`).
 - The bottom of the queue shows the selected session's last message (or recent tool calls while working), its project, Palaver link and linked context.
@@ -163,3 +163,10 @@ Derived from the prototype in `ticket-cockpit-proto/` (Node daemon `tk.mjs`, Rus
 - Ready-ticket and working counts in the bar (noise).
 - One constellation star per tool call; closing a constellation at every turn.
 - Housekeeping or meeting search implementing anything.
+
+## Robustness (2026-11-18)
+
+- `ticket.start` is idempotent: Claude still running in the ticket's window → nothing starts (`started:false, reason:"already running"`, the TUI says "TIC-1 is already running" and moves there); Claude exited (the window is left with a shell) → Claude is respawned in the same pane with the same command, directory and environment (`restarted:true`, event `restarted`); no window → created. The same holds for the housekeeping and meeting windows. Running is told by `@tk_run` on the pane (set by the launch script), a live session in the DB, or, for windows of older builds, a foreground command that is not a shell.
+- A ticket with a window counts as having a window even when its session ended: the projects tab's `⏎` and the right-side follow go to that window. `/api/state` and `/api/summary` carry `windows` (name, pane, claude).
+- Build identity: mtime and size of the executable, read at startup (`COCKPIT_BUILD` overrides it for tests). `/api/health` and `cockpit daemon status` show it; the queue marks its pane `@tk_build`. `cockpit` (launcher) replaces a queue whose build differs or is missing; `cockpit install` restarts a daemon of another build; the TUI shows "daemon is a different build: cockpit daemon restart".
+- The TUI never shows an HTTP status: a 404 reads "the daemon doesn't know <tool>: restart it (cockpit daemon restart)".
