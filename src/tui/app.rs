@@ -1,0 +1,634 @@
+//! The queue's state, its refresh tick and key routing.
+use super::api::{is_down, Api};
+use super::bindings;
+use super::queue::{self, Row, READY};
+use super::travel::Travel;
+use super::widgets::{input_line, picker_key, render_picker, str, tabs_line, Pick, Picker, PickerKey};
+use crate::tmux::Tmux;
+use ratatui::{
+    crossterm::event::{KeyCode, KeyEvent, KeyEventKind},
+    layout::{Constraint, Layout},
+    style::{Modifier, Style, Stylize},
+    text::Line,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    Frame,
+};
+use serde_json::{json, Value};
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Tab {
+    Queue,
+}
+
+pub struct App {
+    pub api: Api,
+    pub tmux: Tmux,
+    pub travel: Option<Travel>,
+    me: String,
+    bound_key: String,
+    pub tab: Tab,
+    pub rows: Vec<Row>,
+    pub sel_id: String,
+    pub settings: Vec<Value>,
+    /// Project and linked context of the selected ticket.
+    pub context: Vec<String>,
+    pub flash: String,
+    /// The reply line (`r`).
+    pub input: Option<String>,
+    pub picker: Option<Picker>,
+    pub show_help: bool,
+    /// Set while the daemon does not answer.
+    pub down: Option<String>,
+    /// Refresh on the next loop turn (after an action).
+    pub refresh: bool,
+    pub quit: bool,
+    /// Seconds since the epoch, for waiting times.
+    pub now: i64,
+}
+
+pub fn now_secs() -> i64 {
+    crate::util::now_ms() / 1000
+}
+
+impl App {
+    pub fn new(api: Api, tmux: Tmux, travel: Option<Travel>, me: &str) -> Self {
+        App {
+            api,
+            tmux,
+            travel,
+            me: me.into(),
+            bound_key: String::new(),
+            tab: Tab::Queue,
+            rows: vec![],
+            sel_id: String::new(),
+            settings: vec![],
+            context: vec![],
+            flash: String::new(),
+            input: None,
+            picker: None,
+            show_help: false,
+            down: None,
+            refresh: true,
+            quit: false,
+            now: now_secs(),
+        }
+    }
+
+    fn idx(&self) -> usize {
+        self.rows.iter().position(|r| r.id == self.sel_id).unwrap_or(0).min(self.rows.len().saturating_sub(1))
+    }
+
+    pub fn cur(&self) -> Option<&Row> {
+        self.rows.get(self.idx())
+    }
+
+    fn setting(&self, key: &str) -> Value {
+        self.settings.iter().find(|s| str(s, "key") == key).map(|s| s["value"].clone()).unwrap_or(Value::Null)
+    }
+
+    pub fn replies(&self) -> Vec<(char, String)> {
+        queue::quick_replies(&self.settings)
+    }
+
+    fn tool(&self, name: &str, args: Value) -> Result<Value, String> {
+        self.api.tool(name, args)
+    }
+
+    /// Takes the daemon's state: rows, and the selection kept (or moved to what the bar asked for).
+    pub fn load_state(&mut self, st: &Value) {
+        self.rows = queue::rows(st);
+        let i = self.idx();
+        self.sel_id = self.rows.get(i).map(|r| r.id.clone()).unwrap_or_default();
+    }
+
+    /// One refresh: data from the daemon, tmux bindings, where the queue sits.
+    pub fn tick(&mut self) {
+        self.now = now_secs();
+        match self.api.get("/api/state") {
+            Ok(st) => {
+                self.down = None;
+                self.load_state(&st);
+                if let Ok(s) = self.tool("settings.get", json!({})) {
+                    self.settings = s.as_array().cloned().unwrap_or_default();
+                }
+            }
+            Err(e) if is_down(&e) => self.down = Some(e),
+            Err(e) => self.flash = e,
+        }
+        if self.down.is_none() {
+            self.refresh_context();
+        }
+        if self.travel.is_some() {
+            self.tick_tmux();
+        }
+    }
+
+    fn tick_tmux(&mut self) {
+        let key = bindings::queue_key(&self.settings);
+        self.bound_key = bindings::assert_keys(&self.tmux, &self.me, &key, &self.bound_key);
+        if bindings::sync_confirm(&self.tmux, bindings::confirm_setting(&self.settings)) {
+            let _ = self.tool("settings.set", json!({"key": "confirm_interrupt", "value": false}));
+        }
+        let Some(mut travel) = self.travel.take() else { return };
+        if let Some(id) = travel.pending_select() {
+            self.sel_id = id;
+        }
+        let focus = self.focus();
+        let width = self.setting("queue_width").as_i64().unwrap_or(38);
+        travel.show_slot(&self.slot_key(), || self.slot_text());
+        let out = travel.sync(focus.as_ref(), &self.rows, &self.sel_id, false, width, &self.replies());
+        if let Some(id) = out.select {
+            self.sel_id = id;
+        }
+        self.refresh |= out.refresh;
+        self.travel = Some(travel);
+    }
+
+    /// The row whose window the queue should sit in.
+    fn focus(&self) -> Option<Row> {
+        self.cur().cloned()
+    }
+
+    /// Identifies what the home window's right pane shows, so it is redrawn only when that changes.
+    fn slot_key(&self) -> String {
+        String::new()
+    }
+
+    fn slot_text(&self) -> String {
+        "\n  no live tmux session selected\n".to_string()
+    }
+
+    fn refresh_context(&mut self) {
+        self.context = match self.cur().filter(|r| !r.key.is_empty()).cloned() {
+            Some(r) => {
+                let mut c = vec![];
+                if let Some(p) = &r.project {
+                    let projects = self.tool("project.list", json!({})).unwrap_or(json!([]));
+                    c.extend(projects.as_array().into_iter().flatten().filter(|x| str(x, "name") == p).map(|x| {
+                        format!("◆ {} · Palaver: {}", p, x["palaver"].as_str().unwrap_or("not linked (l to link)"))
+                    }));
+                }
+                let links = self.tool("ticket.links", json!({"key": r.key})).unwrap_or(json!([]));
+                c.extend(
+                    links
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|l| format!("  ▸ {}  {}", str(l, "title"), str(l, "why"))),
+                );
+                c
+            }
+            None => vec![],
+        };
+    }
+
+    /// Q and shutdown: the queue goes home and the slot closes.
+    pub fn shutdown(&mut self) {
+        if let Some(t) = &self.travel {
+            t.stop();
+        }
+    }
+
+    // ---- keys ------------------------------------------------------------------------------------------------
+
+    fn send(&self, body: Value) -> String {
+        match self.cur() {
+            Some(r) if r.section == READY => String::new(),
+            Some(r) if r.pane => self.api.send(&r.id, body).err().unwrap_or_default(),
+            Some(_) => "not in tmux: view only".into(),
+            None => String::new(),
+        }
+    }
+
+    fn send_reply(&mut self, text: &str) {
+        self.flash = self.send(json!({"text": text}));
+        if self.flash.is_empty() && self.cur().is_some_and(|r| r.pane && r.section < READY) {
+            self.flash = format!("sent \"{text}\"");
+        }
+    }
+
+    pub fn handle_key(&mut self, k: KeyEvent) {
+        if k.kind != KeyEventKind::Press {
+            return;
+        }
+        self.flash.clear();
+        self.refresh = true; // refresh right after an action
+        if self.picker.is_some() {
+            return self.picker_key(k);
+        }
+        if let Some(t) = self.input.as_mut() {
+            match k.code {
+                KeyCode::Esc => self.input = None,
+                KeyCode::Backspace => {
+                    t.pop();
+                }
+                KeyCode::Char(c) => t.push(c),
+                KeyCode::Enter => {
+                    let text = std::mem::take(t);
+                    self.input = None;
+                    if !text.is_empty() {
+                        self.send_reply(&text);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if k.code == KeyCode::Char('?') {
+            self.show_help = !self.show_help;
+            return;
+        }
+        self.queue_key(k);
+    }
+
+    fn mv(&mut self, d: isize) {
+        let i = (self.idx() as isize + d).clamp(0, self.rows.len().saturating_sub(1) as isize) as usize;
+        self.sel_id = self.rows.get(i).map(|r| r.id.clone()).unwrap_or_default();
+    }
+
+    fn queue_key(&mut self, k: KeyEvent) {
+        let cur = self.cur().cloned();
+        match k.code {
+            // q leaves the cockpit (it keeps running, like a daemon); Q stops the queue itself
+            KeyCode::Char('q') => {
+                if let Some(t) = &self.travel {
+                    t.detach_clients();
+                } else {
+                    self.quit = true;
+                }
+            }
+            KeyCode::Char('Q') => self.quit = true,
+            KeyCode::Char('p') => match cur.filter(|r| !r.key.is_empty()) {
+                Some(r) => self.picker = self.project_picker(&r.key, false),
+                None => self.flash = "no ticket on this row".into(),
+            },
+            // l: link meeting context; walks through project and Palaver linking first when missing
+            KeyCode::Char('l') => match cur.filter(|r| !r.key.is_empty()) {
+                Some(r) => {
+                    self.picker = match self.tool("palaver.meetings", json!({"key": r.key, "limit": 1})) {
+                        Ok(_) => self.meeting_picker(&r.key),
+                        Err(e) if e.contains("has no project") => self.project_picker(&r.key, true),
+                        Err(e) if e.contains("not linked") => {
+                            self.palaver_picker(&r.key, r.project.as_deref().unwrap_or(""), true)
+                        }
+                        Err(e) => {
+                            self.flash = e;
+                            None
+                        }
+                    }
+                }
+                None => self.flash = "no ticket on this row".into(),
+            },
+            // Enter moves the cursor into the session's Claude pane; the queue stays next to it
+            KeyCode::Enter => {
+                let attached = self.travel.as_ref().is_some_and(|t| t.attach());
+                if let (false, Some(r)) = (attached, cur) {
+                    self.flash = match (r.section, r.pane, &r.cockpit_pane) {
+                        (READY, ..) => "s starts a session for this ticket".into(),
+                        (_, true, None) => {
+                            format!("runs in your own tmux ({}): reply keys work, attach there", r.place)
+                        }
+                        (_, false, _) => "this session is not running in tmux: view only".into(),
+                        _ => String::new(),
+                    };
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.mv(1),
+            KeyCode::Char('k') | KeyCode::Up => self.mv(-1),
+            KeyCode::Char('r') if cur.as_ref().is_some_and(|r| r.section < READY) => self.input = Some(String::new()),
+            KeyCode::Char(ch @ '1'..='4') => self.flash = self.send(json!({"keys": [ch.to_string()]})),
+            KeyCode::Char('a') => self.flash = self.send(json!({"keys": ["Enter"]})),
+            KeyCode::Char('x') => self.flash = self.send(json!({"keys": ["Escape"]})),
+            KeyCode::Char('s') => {
+                if let Some(r) = cur.filter(|r| r.section == READY) {
+                    self.start_ticket(&r.id);
+                }
+            }
+            KeyCode::Char(ch) => {
+                if let Some((_, text)) = self.replies().into_iter().find(|(c, _)| *c == ch) {
+                    if cur.is_some_and(|r| r.section < READY) {
+                        self.send_reply(&text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn start_ticket(&mut self, key: &str) {
+        self.flash = match self.tool("ticket.start", json!({"key": key})) {
+            Ok(_) => format!("started {key}"),
+            Err(e) => e,
+        };
+    }
+
+    // ---- pickers ---------------------------------------------------------------------------------------------
+
+    pub fn project_picker(&mut self, key: &str, then_meetings: bool) -> Option<Picker> {
+        let ps = self.tool("project.list", json!({})).unwrap_or(json!([]));
+        let items = ps
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let pv = p["palaver"].as_str().map(|v| format!(", Palaver: {v}")).unwrap_or_default();
+                (
+                    format!("◆ {}  ({} tickets{pv})", str(p, "name"), p["tickets"]),
+                    str(p, "name").to_string(),
+                    String::new(),
+                )
+            })
+            .collect();
+        let mut p = Picker::new(Pick::Project, format!("Project for {key} (type to create)"), items);
+        p.key = key.into();
+        p.then_meetings = then_meetings;
+        Some(p)
+    }
+
+    fn palaver_picker(&mut self, key: &str, project: &str, then_meetings: bool) -> Option<Picker> {
+        match self.tool("palaver.projects", json!({})) {
+            Ok(ps) => {
+                let items = ps
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|p| {
+                        (
+                            format!("{}  ({} meetings)", str(p, "name"), p["meetings"]),
+                            str(p, "name").to_string(),
+                            str(p, "description").to_string(),
+                        )
+                    })
+                    .collect();
+                let mut p = Picker::new(Pick::Palaver, format!("Link ◆ {project} to a Palaver project"), items);
+                p.key = key.into();
+                p.project = project.into();
+                p.then_meetings = then_meetings;
+                Some(p)
+            }
+            Err(e) => {
+                self.flash = e;
+                None
+            }
+        }
+    }
+
+    fn meeting_picker(&mut self, key: &str) -> Option<Picker> {
+        match self.tool("palaver.meetings", json!({"key": key})) {
+            Ok(ms) => {
+                let items = ms
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|m| {
+                        let mark = if m["linked"] == true { "✓" } else { " " };
+                        let day = str(m, "start").get(..10).unwrap_or("");
+                        (
+                            format!("{mark} {day}  {}  ({} min)", str(m, "title"), m["minutes"]),
+                            str(m, "id").to_string(),
+                            str(m, "summary").to_string(),
+                        )
+                    })
+                    .collect();
+                let mut p = Picker::new(Pick::Meeting, format!("Meeting context for {key}"), items);
+                p.key = key.into();
+                Some(p)
+            }
+            Err(e) => {
+                self.flash = e;
+                None
+            }
+        }
+    }
+
+    fn picker_key(&mut self, k: KeyEvent) {
+        let Some(p) = self.picker.as_mut() else { return };
+        match picker_key(p, k) {
+            PickerKey::Nothing => {}
+            PickerKey::Close => self.picker = None,
+            PickerKey::AutoLink => {
+                let key = p.key.clone();
+                self.flash = match self.tool("ticket.auto_link_meetings", json!({"key": key})) {
+                    Ok(v) => format!("Claude is looking through the meetings in {}", str(&v, "window")),
+                    Err(e) => e,
+                };
+                self.picker = None;
+            }
+            PickerKey::Choose => {
+                let Some(v) = p.choice() else { return };
+                let (kind, key, project, then) = (p.kind, p.key.clone(), p.project.clone(), p.then_meetings);
+                self.picker = self.choose(kind, &key, &project, then, &v);
+            }
+        }
+    }
+
+    /// Acts on a picked value; returns the next picker of the meeting flow, if any.
+    fn choose(&mut self, kind: Pick, key: &str, project: &str, then: bool, v: &str) -> Option<Picker> {
+        match kind {
+            Pick::Project => match self.tool("ticket.set_project", json!({"key": key, "project": v})) {
+                Ok(_) => {
+                    let linked = self
+                        .tool("project.list", json!({}))
+                        .ok()
+                        .and_then(|ps| ps.as_array().cloned())
+                        .into_iter()
+                        .flatten()
+                        .any(|x| str(&x, "name") == v && !x["palaver"].is_null());
+                    self.flash = format!("{key} → ◆ {v}");
+                    match (linked, then) {
+                        (true, true) => self.meeting_picker(key),
+                        (true, false) => None,
+                        (false, _) => self.palaver_picker(key, v, then),
+                    }
+                }
+                Err(e) => {
+                    self.flash = e;
+                    None
+                }
+            },
+            Pick::Palaver => match self.tool("project.link_palaver", json!({"project": project, "palaver": v})) {
+                Ok(_) => {
+                    self.flash = format!("◆ {project} ↔ Palaver {v}");
+                    if then {
+                        self.meeting_picker(key)
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    self.flash = e;
+                    None
+                }
+            },
+            Pick::Meeting => {
+                self.flash = match self.tool("ticket.link_meeting", json!({"key": key, "meeting_id": v})) {
+                    Ok(r) => format!(
+                        "linked \"{}\"{}",
+                        str(&r, "title"),
+                        if r["pasted"] == true { ", pasted into the session's prompt" } else { "" }
+                    ),
+                    Err(e) => e,
+                };
+                None
+            }
+            Pick::Cluster | Pick::OpenProject => None,
+        }
+    }
+
+    // ---- drawing ---------------------------------------------------------------------------------------------
+
+    pub fn draw(&self, f: &mut Frame) {
+        let [main, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(4)]).areas(f.area());
+        let [left, right] = Layout::vertical([Constraint::Min(5), Constraint::Length(12)]).areas(main);
+        let tabs = tabs_line(0);
+        let mut items = vec![ListItem::new(tabs), ListItem::new("")];
+        let mut sel = None;
+        if let Some(e) = &self.down {
+            let what = e.split(" (").next().unwrap_or(e).to_string();
+            items.push(ListItem::new(Line::from(format!(" {what}")).yellow()));
+            items.push(ListItem::new(Line::from(format!("   waiting for {}", self.api.base())).dim()));
+        } else {
+            let (rows, s) = queue::list_items(&self.rows, self.cur().map_or("", |r| r.id.as_str()), self.now);
+            sel = s.map(|s| s + 2);
+            items.extend(rows);
+        }
+        let mut ls = ListState::default();
+        ls.select(sel);
+        f.render_stateful_widget(
+            List::new(items)
+                .block(Block::new().borders(Borders::BOTTOM))
+                .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            left,
+            &mut ls,
+        );
+        if let Some(r) = self.cur() {
+            f.render_widget(
+                Paragraph::new(queue::detail(r, &self.context, self.now)).wrap(Wrap { trim: false }),
+                right,
+            );
+        }
+        if let Some(p) = &self.picker {
+            render_picker(f, main, p);
+        }
+        f.render_widget(Paragraph::new(self.footer()).wrap(Wrap { trim: true }), bar);
+    }
+
+    fn footer(&self) -> Line<'static> {
+        if let Some(t) = &self.input {
+            return input_line("reply", t);
+        }
+        if !self.flash.is_empty() {
+            return Line::from(format!(" {}", self.flash)).yellow();
+        }
+        if self.show_help {
+            return Line::from(" ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · s start · p project · l link meeting · r reply (quick replies) · 1-4 pick · a accept · x interrupt · q leave · Q stop queue").dim();
+        }
+        Line::from(" ⇥ tabs · ? all keys · q leave").dim()
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use crate::util::ms_from_iso;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    pub fn app() -> App {
+        let mut a = App::new(Api::new("http://127.0.0.1:1"), Tmux::private("app-unit"), None, "%0");
+        a.now = ms_from_iso("2026-11-18T09:42:00Z").unwrap() / 1000;
+        a.load_state(&queue::sample_state());
+        a.settings = vec![json!({"key": "quick_replies", "value": "c=continue; y=yes"})];
+        a
+    }
+
+    pub fn screen(a: &App, w: u16, h: u16) -> Vec<String> {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+            .collect()
+    }
+
+    pub fn press(a: &mut App, c: KeyCode) {
+        a.handle_key(KeyEvent::new(c, ratatui::crossterm::event::KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn queue_shows_sections_rows_and_chips_under_the_selection() {
+        let a = app();
+        let s = screen(&a, 70, 30);
+        assert_eq!(
+            &s[..12],
+            [
+                " queue   ⇥",
+                "",
+                "NEEDS YOU 1",
+                " DEM-1  Login 42m",
+                "   demo · feat/x · cockpit:DEM-1 · ◆ Demo",
+                "   [⏎] attach  [1-4] pick  [a] accept  [r] reply  [x] interrupt",
+                "",
+                "YOUR TURN 1",
+                " demo · main 32m",
+                "   demo · main · main:zsh",
+                "",
+                "WORKING 1",
+            ]
+        );
+        // the detail block shows the message under the label
+        assert!(s.iter().any(|l| l.contains("NEEDS YOU 42m · demo · feat/x")));
+        assert!(s.iter().any(|l| l == "which db?"));
+        assert_eq!(s.last().map(String::as_str), Some(""));
+        assert!(s.iter().any(|l| l == "⇥ tabs · ? all keys · q leave"));
+    }
+
+    #[test]
+    fn moving_the_selection_moves_the_chips_and_the_detail() {
+        let mut a = app();
+        for _ in 0..3 {
+            press(&mut a, KeyCode::Char('j'));
+        }
+        assert_eq!(a.cur().map(|r| r.id.as_str()), Some("DEM-2"));
+        let s = screen(&a, 70, 40);
+        assert!(s.iter().any(|l| l == "   [s] start  [p] project  [l] meeting"), "{s:#?}");
+        assert!(s.iter().any(|l| l == "do it"));
+        // going past the end stays on the last row; k goes back
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(a.sel_id, "DEM-2");
+        press(&mut a, KeyCode::Char('k'));
+        assert_eq!(a.sel_id, "s2");
+    }
+
+    #[test]
+    fn reply_line_and_help_and_flash() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('r'));
+        for c in "hi".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        assert_eq!(screen(&a, 70, 30)[26], "reply › hi▏");
+        press(&mut a, KeyCode::Esc);
+        assert!(a.input.is_none());
+        press(&mut a, KeyCode::Char('?'));
+        assert!(screen(&a, 70, 30)[26].contains("⏎ attach (⇧esc back)"));
+        press(&mut a, KeyCode::Char('?'));
+        // a refused or failed action is the footer; the daemon is down in tests, so the refusal is its message
+        press(&mut a, KeyCode::Char('a'));
+        assert!(a.flash.contains("daemon not running"), "{}", a.flash);
+        assert!(screen(&a, 70, 30)[26].starts_with("daemon not running"));
+        // ready rows take no reply
+        a.sel_id = "DEM-2".into();
+        press(&mut a, KeyCode::Char('r'));
+        assert!(a.input.is_none());
+    }
+
+    #[test]
+    fn a_missing_daemon_is_a_message_not_a_crash() {
+        let mut a = app();
+        a.tick();
+        assert!(a.down.is_some());
+        let s = screen(&a, 70, 20);
+        assert_eq!(s[2], " daemon not running: cockpit daemon start");
+        assert_eq!(s[3], "   waiting for http://127.0.0.1:1");
+    }
+}

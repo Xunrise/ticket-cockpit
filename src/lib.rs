@@ -15,4 +15,5 @@ pub mod summary;
 pub mod tickets;
 pub mod tmux;
 pub mod tools;
+pub mod tui;
 pub mod util;

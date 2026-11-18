@@ -61,7 +61,10 @@ pub struct Tmux {
 impl Tmux {
     pub fn system() -> Self {
         let conf = crate::paths::tmux_conf();
-        Tmux { cockpit_sock: "cockpit".into(), default_sock: "default".into(), conf: conf.exists().then_some(conf) }
+        // COCKPIT_TMUX_SOCKET moves the cockpit's server (smoke tests run on a private one)
+        let cockpit_sock =
+            std::env::var("COCKPIT_TMUX_SOCKET").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "cockpit".into());
+        Tmux { cockpit_sock, default_sock: "default".into(), conf: conf.exists().then_some(conf) }
     }
 
     /// Two private sockets for tests, so nothing touches the user's servers.

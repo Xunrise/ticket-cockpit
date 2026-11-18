@@ -31,10 +31,6 @@ fn run(mut args: Vec<String>) -> anyhow::Result<()> {
         // TODO(plan step 12): seed a fresh install from existing Claude transcripts
         Some("onboard") => anyhow::bail!("`onboard` is not implemented yet (TODO: plan step 12)"),
         Some(other) => anyhow::bail!("unknown command {other}"),
-        // TODO(plan steps 8-10): the TUI. Outside the cockpit's tmux it will attach/create the session; inside, run the queue.
-        None => {
-            println!("TUI not built yet");
-            Ok(())
-        }
+        None => cockpit::tui::launch(),
     }
 }
