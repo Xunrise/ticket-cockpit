@@ -1,5 +1,9 @@
 pub mod cli;
+pub mod connections;
+pub mod ctx;
+pub mod daemon;
 pub mod db;
+pub mod http;
 pub mod palaver;
 pub mod panes;
 pub mod paths;
@@ -7,6 +11,8 @@ pub mod projects;
 pub mod prompt;
 pub mod sessions;
 pub mod settings;
+pub mod summary;
 pub mod tickets;
 pub mod tmux;
+pub mod tools;
 pub mod util;

@@ -88,6 +88,25 @@ pub fn ticket_command(mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// `cockpit tool NAME '{json}'`. Inside the cockpit's tmux the caller's pane is passed along,
+/// so pane tools act on the session's own window; an explicit ticket key wins.
+pub fn tool_command(args: Vec<String>) -> Result<()> {
+    let name = args.get(1).ok_or_else(|| anyhow!("usage: cockpit tool NAME '{{json}}'"))?;
+    let mut input: serde_json::Value = serde_json::from_str(args.get(2).map(String::as_str).unwrap_or("{}"))?;
+    let ctx = crate::ctx::Ctx::from_env();
+    let env = crate::sessions::HookEnv::from_process();
+    if let (true, Some(pane), Some(obj)) = (env.on_cockpit(&ctx.tmux), &env.tmux_pane, input.as_object_mut()) {
+        if !obj.contains_key("key") {
+            obj.entry("caller_pane").or_insert_with(|| pane.clone().into());
+        }
+    }
+    match crate::tools::call(&ctx, name, input)? {
+        serde_json::Value::String(s) => println!("{s}"),
+        v => println!("{}", serde_json::to_string_pretty(&v)?),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

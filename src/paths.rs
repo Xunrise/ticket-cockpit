@@ -44,6 +44,14 @@ pub fn palaver_bin() -> PathBuf {
         .unwrap_or_else(|| home().join("Applications/Palaver.app/Contents/Resources/bin/palaver"))
 }
 
+pub fn palaver_sock() -> PathBuf {
+    home().join("Library/Application Support/palaver/app.sock")
+}
+
+pub fn launch_agent_plist() -> PathBuf {
+    home().join("Library/LaunchAgents/io.cockpit.daemon.plist")
+}
+
 pub fn log_dir() -> PathBuf {
     data_dir().join("logs")
 }
