@@ -178,6 +178,7 @@ pub fn state(ctx: &Ctx) -> anyhow::Result<Value> {
         "repos": crate::db::rows(&conn, "SELECT * FROM repos ORDER BY name", [])?,
         "ready": tickets::ready(&conn, None)?.iter().map(|t| &t.key).collect::<Vec<_>>(),
         "panes": where_.keys().collect::<Vec<_>>(),
+        "windows": crate::panes::windows(&ctx.tmux),
     }))
 }
 

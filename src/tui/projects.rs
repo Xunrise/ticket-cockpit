@@ -192,10 +192,26 @@ impl App {
         }
     }
 
-    /// The live row of the selected ticket's session (the queue travels to its window).
+    /// The window of a ticket in the cockpit session, with its Claude pane.
+    fn window_of(&self, key: &str) -> Option<&Value> {
+        self.windows.iter().find(|w| str(w, "name") == key)
+    }
+
+    /// The row the queue should travel to for the selected ticket: its live session, else its window (a ticket
+    /// whose Claude ended keeps its window), else nowhere.
     pub(super) fn project_focus(&self) -> Option<super::queue::Row> {
-        let sid = self.projects.cur()?.session.as_ref()?;
-        self.rows.iter().find(|r| &r.id == sid).cloned()
+        let cur = self.projects.cur()?;
+        if let Some(sid) = &cur.session {
+            return self.rows.iter().find(|r| &r.id == sid).cloned();
+        }
+        let w = self.window_of(&cur.key)?;
+        Some(
+            self.rows
+                .iter()
+                .find(|r| r.section == super::queue::ENDED && r.key == cur.key)
+                .cloned()
+                .unwrap_or_else(|| super::queue::window_row(&cur.key, &cur.label, str(w, "pane"))),
+        )
     }
 
     /// Typing a filter or a new task's title.
@@ -297,16 +313,25 @@ impl App {
                 }
             }
             KeyCode::Char('s') => {
-                if let Some(r) = cur.filter(|r| r.status == "todo" || r.status == "backlog") {
+                if let Some(r) = cur.filter(|r| r.status != "done" && r.status != "canceled") {
                     self.start_ticket(&r.key);
                 }
             }
-            KeyCode::Enter => match cur.and_then(|r| r.session) {
-                Some(s) => {
-                    self.sel_id = s;
+            KeyCode::Enter => match cur {
+                Some(r) if r.session.is_some() => {
+                    self.sel_id = r.session.unwrap_or_default();
                     self.tab = Tab::Queue;
                 }
-                None => self.flash = "no live session for this ticket (s starts one)".into(),
+                // Claude ended but the window is still there: the queue already sits in it, go in
+                Some(r) if self.window_of(&r.key).is_some() => {
+                    if self.rows.iter().any(|x| x.section == super::queue::ENDED && x.key == r.key) {
+                        self.sel_id = r.key;
+                        self.tab = Tab::Queue;
+                    } else if !self.travel.as_ref().is_some_and(|t| t.attach()) {
+                        self.flash = format!("{} has a window, no session in it", r.key);
+                    }
+                }
+                _ => self.flash = "no window for this ticket (s starts one)".into(),
             },
             _ => return false,
         }
@@ -360,6 +385,9 @@ impl App {
                         let mut h: Vec<(&str, String)> = vec![];
                         if r.session.is_some() {
                             h.push(("⏎", "open session".into()));
+                        } else if self.window_of(&r.key).is_some() {
+                            h.push(("s", "restart session".into()));
+                            h.push(("⏎", "open window".into()));
                         }
                         if r.status == "todo" || r.status == "backlog" {
                             h.push(("s", "start".into()));
@@ -405,7 +433,7 @@ impl App {
         if self.projects.open.is_none() {
             " ⇥ tabs · j/k move · ⏎ open project · , settings · q leave"
         } else {
-            " ⇥ tabs · esc projects · o switch project · j/k move · / filter · n new task · g cluster · H let Claude housekeep · s start · ⏎ open session · q leave"
+            " ⇥ tabs · esc projects · o switch project · j/k move · / filter · n new task · g cluster · H let Claude housekeep · s start/restart · ⏎ open session/window · q leave"
         }
     }
 }
@@ -474,5 +502,37 @@ mod tests {
         assert!(s.contains("▸ Kickoff"));
         assert!(s.contains("abcdef01  turn · feat/x"));
         assert!(s.ends_with("n new task\x1b[0m\n"));
+    }
+
+    #[test]
+    fn the_queue_travels_to_the_window_of_a_ticket_whose_session_ended() {
+        use crate::tui::app::tests::app;
+        let mut a = app();
+        a.load_state(&crate::tui::queue::ended_state());
+        let mut ov = sample_overview();
+        ov["doing"].as_array_mut().unwrap().push(
+            json!({"key": "DEM-3", "title": "Dropped", "status": "doing", "priority": 2, "cluster": null, "body": ""}),
+        );
+        a.projects.open = Some("Demo".into());
+        a.projects.set_overview(ov);
+        let focus = |a: &mut App, key: &str| {
+            a.projects.psel = a.projects.rows.iter().position(|r| r.key == key).unwrap();
+            a.project_focus().map(|r| (r.id, r.cockpit_pane))
+        };
+        // live session: its row; ended session with a window: the window; no window: nowhere
+        assert_eq!(focus(&mut a, "DEM-1"), Some(("s1".into(), Some("%7".into()))));
+        assert_eq!(focus(&mut a, "DEM-3"), Some(("DEM-3".into(), Some("%11".into()))));
+        assert_eq!(focus(&mut a, "DEM-2"), None);
+        // a window of a ticket that is not in progress is still a window
+        a.windows.push(json!({"name": "DEM-2", "pane": "cockpit:%12", "claude": false}));
+        assert_eq!(focus(&mut a, "DEM-2"), Some(("DEM-2".into(), Some("%12".into()))));
+        // enter goes to the ended row in the queue
+        focus(&mut a, "DEM-3");
+        a.tab = Tab::Projects;
+        a.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!((a.tab, a.sel_id.as_str()), (Tab::Queue, "DEM-3"));
     }
 }

@@ -149,6 +149,7 @@ pub fn summary_at(ctx: &Ctx, now: i64) -> Result<Value> {
     let today = &iso_from_ms(now)[..10];
     Ok(json!({
         "focus": focus(&prompt_rows(&conn, now)?, &sessions, &doing, now),
+        "windows": crate::panes::windows(&ctx.tmux),
         "calls": ctx.calls.lock().map(|c| c.clone()).unwrap_or(Value::Null),
         "attention": sessions.iter().filter(|s| s["state"] != "working").collect::<Vec<_>>(),
         "working": sessions.iter().filter(|s| s["state"] == "working").collect::<Vec<_>>(),
@@ -284,5 +285,6 @@ mod tests {
         assert_eq!(s["projects"][0], json!({"name": "P", "palaver": null, "doing": 0, "open": 1}));
         assert_eq!(s["focus"]["forgotten"][0]["waiting_min"], 50);
         assert!(s["calls"].is_object());
+        assert_eq!(s["windows"], json!([]), "no cockpit session, no windows");
     }
 }

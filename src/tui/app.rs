@@ -2,7 +2,7 @@
 use super::api::{is_down, Api};
 use super::bindings;
 use super::projects;
-use super::queue::{self, Row, READY};
+use super::queue::{self, Row, ENDED, READY};
 use super::settings;
 use super::travel::Travel;
 use super::widgets::{input_line, picker_key, render_picker, str, tabs_line, Pick, Picker, PickerKey};
@@ -34,6 +34,8 @@ pub struct App {
     bound_key: String,
     pub tab: Tab,
     pub rows: Vec<Row>,
+    /// The cockpit session's ticket windows (`name`, `pane`, `claude`).
+    pub windows: Vec<Value>,
     pub sel_id: String,
     pub settings: Vec<Value>,
     /// Project and linked context of the selected ticket.
@@ -68,6 +70,7 @@ impl App {
             bound_key: String::new(),
             tab: Tab::Queue,
             rows: vec![],
+            windows: vec![],
             sel_id: String::new(),
             settings: vec![],
             context: vec![],
@@ -107,6 +110,7 @@ impl App {
     /// Takes the daemon's state: rows, and the selection kept (or moved to what the bar asked for).
     pub fn load_state(&mut self, st: &Value) {
         self.rows = queue::rows(st);
+        self.windows = st["windows"].as_array().cloned().unwrap_or_default();
         let i = self.idx();
         self.sel_id = self.rows.get(i).map(|r| r.id.clone()).unwrap_or_default();
     }
@@ -228,6 +232,7 @@ impl App {
     fn send(&self, body: Value) -> String {
         match self.cur() {
             Some(r) if r.section == READY => String::new(),
+            Some(r) if r.section == ENDED => format!("{} has no live session: s restarts it", r.key),
             Some(r) if r.pane => self.api.send(&r.id, body).err().unwrap_or_default(),
             Some(_) => "not in tmux: view only".into(),
             None => String::new(),
@@ -236,7 +241,7 @@ impl App {
 
     fn send_reply(&mut self, text: &str) {
         self.flash = self.send(json!({"text": text}));
-        if self.flash.is_empty() && self.cur().is_some_and(|r| r.pane && r.section < READY) {
+        if self.flash.is_empty() && self.cur().is_some_and(|r| r.pane && r.section < ENDED) {
             self.flash = format!("sent \"{text}\"");
         }
     }
@@ -351,18 +356,18 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.mv(1),
             KeyCode::Char('k') | KeyCode::Up => self.mv(-1),
-            KeyCode::Char('r') if cur.as_ref().is_some_and(|r| r.section < READY) => self.input = Some(String::new()),
+            KeyCode::Char('r') if cur.as_ref().is_some_and(|r| r.section < ENDED) => self.input = Some(String::new()),
             KeyCode::Char(ch @ '1'..='4') => self.flash = self.send(json!({"keys": [ch.to_string()]})),
             KeyCode::Char('a') => self.flash = self.send(json!({"keys": ["Enter"]})),
             KeyCode::Char('x') => self.flash = self.send(json!({"keys": ["Escape"]})),
             KeyCode::Char('s') => {
-                if let Some(r) = cur.filter(|r| r.section == READY) {
+                if let Some(r) = cur.filter(|r| r.section == READY || r.section == ENDED) {
                     self.start_ticket(&r.id);
                 }
             }
             KeyCode::Char(ch) => {
                 if let Some((_, text)) = self.replies().into_iter().find(|(c, _)| *c == ch) {
-                    if cur.is_some_and(|r| r.section < READY) {
+                    if cur.is_some_and(|r| r.section < ENDED) {
                         self.send_reply(&text);
                     }
                 }
@@ -376,7 +381,7 @@ impl App {
     pub fn start_ticket(&mut self, key: &str) {
         self.flash = match self.tool("ticket.start", json!({"key": key})) {
             Ok(r) if r["started"] == false => {
-                if let Some(row) = self.rows.iter().find(|r| r.key == key && r.section < queue::READY) {
+                if let Some(row) = self.rows.iter().find(|r| r.key == key && r.section < ENDED) {
                     self.sel_id = row.id.clone();
                 }
                 format!("{key} is already running")
@@ -680,6 +685,20 @@ pub mod tests {
         assert!(s.iter().any(|l| l == "which db?"));
         assert_eq!(s.last().map(String::as_str), Some(""));
         assert!(s.iter().any(|l| l == "⇥ tabs · ? all keys · q leave"));
+    }
+
+    #[test]
+    fn ended_section_follows_working_and_shows_its_chips() {
+        let mut a = app();
+        a.load_state(&queue::ended_state());
+        a.sel_id = "DEM-3".into();
+        let s = screen(&a, 70, 40);
+        let at = |t: &str| s.iter().position(|l| l.starts_with(t)).unwrap_or_else(|| panic!("{t} in {s:#?}"));
+        assert!(at("WORKING 1") < at("ENDED 1") && at("ENDED 1") < at("READY 1"));
+        assert!(s.iter().any(|l| l == "   [s] restart session  [⏎] open window"), "{s:#?}");
+        // replies are refused, with the way out
+        press(&mut a, KeyCode::Char('1'));
+        assert!(a.flash.contains("s restarts it"), "{}", a.flash);
     }
 
     #[test]

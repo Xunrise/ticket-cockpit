@@ -11,9 +11,16 @@ use serde_json::Value;
 pub const NEEDS: usize = 0;
 pub const TURN: usize = 1;
 pub const WORKING: usize = 2;
-pub const READY: usize = 3;
-pub const SECTIONS: [(&str, Color); 4] =
-    [("NEEDS YOU", Color::Red), ("YOUR TURN", Color::Blue), ("WORKING", Color::Green), ("READY", Color::Reset)];
+/// In-progress tickets whose window exists but whose Claude session is not live.
+pub const ENDED: usize = 3;
+pub const READY: usize = 4;
+pub const SECTIONS: [(&str, Color); 5] = [
+    ("NEEDS YOU", Color::Red),
+    ("YOUR TURN", Color::Blue),
+    ("WORKING", Color::Green),
+    ("ENDED", Color::DarkGray),
+    ("READY", Color::Reset),
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -34,6 +41,23 @@ pub struct Row {
     /// Ticket key, empty for sessions without a ticket.
     pub key: String,
     pub project: Option<String>,
+}
+
+/// The row of a ticket's window whose Claude session is not live (`pane` is the cockpit pane ref).
+pub fn window_row(key: &str, label: &str, pane: &str) -> Row {
+    Row {
+        section: ENDED,
+        id: key.into(),
+        label: label.into(),
+        sub: format!("cockpit:{key}"),
+        place: format!("cockpit:{key}"),
+        since: 0,
+        msg: String::new(),
+        pane: false,
+        cockpit_pane: pane.strip_prefix("cockpit:").map(String::from),
+        key: key.into(),
+        project: None,
+    }
 }
 
 fn secs(iso: &str) -> i64 {
@@ -99,6 +123,24 @@ pub fn rows(st: &Value) -> Vec<Row> {
             project,
         });
     }
+    // doing tickets that have a window but no live session: the window's shell can be reopened or Claude restarted
+    for t in tickets.iter().filter(|t| str(t, "status") == "doing") {
+        let key = str(t, "key");
+        let Some(w) = st["windows"].as_array().unwrap_or(&empty).iter().find(|w| str(w, "name") == key) else {
+            continue;
+        };
+        if out.iter().any(|r| r.key == key) {
+            continue;
+        }
+        let project = t["project"].as_str().filter(|p| !p.is_empty()).map(String::from);
+        out.push(Row {
+            sub: format!("{} · cockpit:{key}{}", str(t, "repo"), proj_suffix(project.as_deref())),
+            since: secs(str(t, "updated")),
+            msg: str(t, "body").into(),
+            project,
+            ..window_row(key, &format!("{key}  {}", str(t, "title")), str(w, "pane"))
+        });
+    }
     for k in st["ready"].as_array().unwrap_or(&empty) {
         if let Some(t) = tickets.iter().find(|t| t["key"] == *k) {
             let project = t["project"].as_str().filter(|p| !p.is_empty()).map(String::from);
@@ -123,7 +165,7 @@ pub fn rows(st: &Value) -> Vec<Row> {
             r.section,
             if r.section < WORKING {
                 r.since
-            } else if r.section == WORKING {
+            } else if r.section == WORKING || r.section == ENDED {
                 -r.since
             } else {
                 0
@@ -150,6 +192,7 @@ pub fn row_hints(r: &Row) -> Vec<(&'static str, String)> {
         NEEDS => vec![("1-4", "pick".into()), ("a", "accept".into()), ("r", "reply".into()), ("x", "interrupt".into())],
         TURN => vec![("r", "reply".into())],
         WORKING => vec![("x", "interrupt".into())],
+        ENDED => vec![("s", "restart session".into()), ("⏎", "open window".into())],
         _ => vec![("s", "start".into()), ("p", "project".into()), ("l", "meeting".into())],
     };
     if r.section < READY && r.pane {
@@ -169,6 +212,7 @@ pub fn border_hints(r: &Row, replies: &[(char, String)]) -> String {
             h += &k("x", "interrupt");
         }
         WORKING => h += &k("x", "interrupt"),
+        ENDED => h += &k("s", "restart session"),
         _ => {}
     }
     if r.section < WORKING {
@@ -254,6 +298,19 @@ pub fn sample_state() -> Value {
     })
 }
 
+/// `sample_state` plus DEM-3: in progress, its session ended, its window still there (and DEM-1's window).
+#[cfg(test)]
+pub fn ended_state() -> Value {
+    let mut st = sample_state();
+    st["tickets"].as_array_mut().unwrap().push(serde_json::json!(
+        {"key": "DEM-3", "title": "Dropped", "status": "doing", "session": "s5", "project": null, "repo": "demo", "priority": 2, "created": "2026-11-18T08:00:00Z", "updated": "2026-11-18T08:30:00Z", "body": ""}));
+    st["windows"] = serde_json::json!([
+        {"name": "DEM-1", "pane": "cockpit:%7", "claude": true},
+        {"name": "DEM-3", "pane": "cockpit:%11", "claude": false},
+    ]);
+    st
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +372,25 @@ mod tests {
             [('c', "continue".to_string()), ('y', "yes".to_string()), ('m', "merge it".to_string())]
         );
         assert!(quick_replies(&[]).is_empty());
+    }
+
+    #[test]
+    fn doing_tickets_with_a_window_but_no_live_session_are_ended() {
+        let r = rows(&ended_state());
+        let ids: Vec<&str> = r.iter().map(|r| r.id.as_str()).collect();
+        // DEM-1 has a window too, but its session is live: it stays a session row
+        assert_eq!(ids, ["s1", "s3", "s2", "DEM-3", "DEM-2"]);
+        let e = &r[3];
+        assert_eq!((e.section, e.key.as_str(), e.cockpit_pane.as_deref()), (ENDED, "DEM-3", Some("%11")));
+        assert_eq!((e.label.as_str(), e.sub.as_str()), ("DEM-3  Dropped", "demo · cockpit:DEM-3"));
+        assert!(!e.pane, "no replies go to an ended window");
+        let hints: Vec<_> = row_hints(e).into_iter().map(|(k, a)| format!("[{k}] {a}")).collect();
+        assert_eq!(hints, ["[s] restart session", "[⏎] open window"]);
+        // a doing ticket without a window is not listed, nor is a window of a ticket that is not in progress
+        let mut st = ended_state();
+        st["windows"] = json!([{"name": "DEM-2", "pane": "cockpit:%12", "claude": false}]);
+        assert!(rows(&st).iter().all(|r| r.section != ENDED));
+        let strip = |s: String| s.replace("#[fg=blue,bold]", "<").replace("#[default]", ">");
+        assert_eq!(strip(border_hints(e, &[])), "<s> restart session   <⏎> attach   ");
     }
 }
