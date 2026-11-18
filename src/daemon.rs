@@ -11,8 +11,20 @@ use std::time::Duration;
 pub const LABEL: &str = "io.cockpit.daemon";
 pub const DEFAULT_PORT: u16 = 4747;
 
+/// Background work on one thread: finishes requested close-outs every 2 s.
+fn scheduler(ctx: Ctx) {
+    loop {
+        if let Err(e) = crate::closeout::finish_requested(&ctx) {
+            crate::errors::log_quiet(&ctx, "daemon", &format!("close-out: {e:#}"), "");
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
 pub fn run(port: u16) -> Result<()> {
     let state = AppState::new(Ctx::from_env());
+    let ctx = state.ctx.clone();
+    std::thread::spawn(move || scheduler(ctx));
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await

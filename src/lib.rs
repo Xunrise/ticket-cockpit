@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod closeout;
 pub mod connections;
 pub mod ctx;
 pub mod daemon;

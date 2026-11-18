@@ -225,8 +225,10 @@ pub fn claim(conn: &Connection, key: &str, session: &str) -> Result<()> {
 }
 
 /// Closing records the summary, the branch and the commits since the session's start HEAD.
+/// Without a session it is the one that claimed the ticket, so the branch and commits are still recorded.
 pub fn close(conn: &Connection, key: &str, session: Option<&str>, summary: &str) -> Result<()> {
-    get(conn, key)?;
+    let session = session.map(String::from).or(get(conn, key)?.session);
+    let session = session.as_deref();
     let sess: Option<(Option<String>, Option<String>)> = match session {
         Some(s) => conn
             .query_row("SELECT head_start, cwd FROM sessions WHERE id=?", [s], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -313,6 +315,28 @@ pub mod tests {
         // another repo with the same prefix continues the sequence so keys stay unique
         assert_eq!(create(&c, new("demolition", "d")).unwrap(), "DEM-3");
         assert_eq!(create(&c, new("42", "e")).unwrap(), "TKT-1");
+    }
+
+    #[test]
+    fn close_without_a_session_uses_the_claiming_one() {
+        let (d, c) = temp_db();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let g = |a: &[&str]| crate::util::sh("git", a, Some(&repo));
+        g(&["init", "-q", "-b", "feature-x"]);
+        g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "start"]);
+        let head = g(&["rev-parse", "HEAD"]);
+        g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "the work"]);
+        c.execute("INSERT INTO sessions(id,cwd,head_start) VALUES('s1',?,?)", params![repo.to_string_lossy(), head])
+            .unwrap();
+        let k = create(&c, new("r", "t")).unwrap();
+        claim(&c, &k, "s1").unwrap();
+        close(&c, &k, None, "done it").unwrap();
+        let text = events(&c, &k).unwrap().into_iter().find(|e| e["kind"] == "closed").unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("done it") && text.contains("branch: feature-x") && text.contains("the work"), "{text}");
     }
 
     #[test]

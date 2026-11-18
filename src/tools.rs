@@ -208,6 +208,12 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "ticket.close_out",
+        desc: "Close out a ticket: mode wrap (ask its session to wrap up and close; the window closes when done), now (close with summary), keep (window closed, ticket back to todo) or drop (canceled)",
+        params: &[("key", "ticket key"), ("mode", "wrap|now|keep|drop"), ("summary", "optional summary for mode now")],
+        run: |c, a| crate::closeout::close_out(c, &str_arg(&a, "key")?, &str_arg(&a, "mode")?, &opt_str(&a, "summary").unwrap_or_default()),
+    },
+    Tool {
         name: "cockpit.log_error",
         desc: "Record an error in the cockpit's error log",
         params: &[("text", "the error"), ("context", "optional where it happened")],
