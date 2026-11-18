@@ -1,6 +1,6 @@
 //! Ticket windows in the cockpit's tmux session, named service panes and their layout.
 use crate::tickets;
-use crate::tmux::{Server, Tmux, SESSION};
+use crate::tmux::{Server, Tmux, HOME_WINDOW, SESSION};
 use crate::{projects, settings};
 use anyhow::{anyhow, bail, Result};
 use rusqlite::Connection;
@@ -20,6 +20,17 @@ pub struct PaneInfo {
     pub cwd: String,
     pub dead: bool,
     pub queue: bool,
+    /// `@tk_run`: "1" while the window's launch script runs Claude, "0" once Claude has exited, empty for windows
+    /// started by an older build.
+    pub run: String,
+}
+
+/// A window of the cockpit session with its Claude pane (`cockpit:%N`) and whether Claude still runs in it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WindowInfo {
+    pub name: String,
+    pub pane: String,
+    pub claude: bool,
 }
 
 /// Which window a pane tool acts on: an explicit ticket key wins over the caller's own pane.
@@ -69,34 +80,126 @@ pub fn window_exists(tmux: &Tmux, name: &str) -> bool {
     tmux.quiet(CK, &["list-windows", "-t", &format!("={SESSION}"), "-F", "#{window_name}"]).lines().any(|w| w == name)
 }
 
-/// `claude "$TK_PROMPT"` in a login shell without inherited Claude variables; the window keeps a shell afterwards.
-/// The command a session window runs. COCKPIT_CLAUDE replaces the `claude` binary (tests use a stand-in).
-fn claude_cmd() -> String {
-    let claude = std::env::var("COCKPIT_CLAUDE").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "claude".into());
-    format!("/bin/zsh -lc {}", sh_quote(&format!(r#"{UNSET_CLAUDE}; {claude} "$TK_PROMPT"; exec zsh"#)))
+/// Records in the pane whether Claude runs. The pane's foreground command cannot tell: the launch script's
+/// own shell stays the process group leader while Claude runs, so tmux reports `zsh` either way.
+const MARK: &str = "tmux set -p @tk_run";
+
+/// The command a session window runs: `claude "$TK_PROMPT"` in a login shell without inherited Claude
+/// variables; the window keeps a shell afterwards.
+fn claude_cmd(claude: &str) -> String {
+    format!(
+        "/bin/zsh -lc {}",
+        sh_quote(&format!(r#"{UNSET_CLAUDE}; {MARK} 1; {claude} "$TK_PROMPT"; {MARK} 0; exec zsh"#))
+    )
+}
+
+/// COCKPIT_CLAUDE replaces the `claude` binary (tests use a stand-in).
+fn claude_bin() -> String {
+    std::env::var("COCKPIT_CLAUDE").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "claude".into())
+}
+
+fn is_shell(cmd: &str) -> bool {
+    matches!(cmd.trim_start_matches('-'), "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh" | "tcsh")
+}
+
+/// The window's Claude pane: the first one that is neither the queue nor a named service pane.
+fn claude_pane(tmux: &Tmux, name: &str) -> Option<PaneInfo> {
+    panes_in(tmux, &format!("={SESSION}:{name}")).ok()?.into_iter().find(|p| p.name.is_none())
+}
+
+/// Claude runs in the pane: the launch script says so; for windows of an older build, a foreground command that is
+/// not a shell does. A live session of the DB counts as running too.
+fn running(p: &PaneInfo, db_live: bool) -> bool {
+    !p.dead
+        && (db_live
+            || match p.run.as_str() {
+                "1" => true,
+                "0" => false,
+                _ => !is_shell(&p.command),
+            })
+}
+
+/// The ticket's claiming session, or any session recorded in this pane, is live per the DB.
+fn session_live(conn: &Connection, session: Option<&str>, pane: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sessions WHERE (id=?1 OR tmux_pane=?2) AND state IN ('needs','turn','working') AND ended IS NULL",
+        rusqlite::params![session.unwrap_or(""), format!("cockpit:{pane}")],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Launch {
+    Created,
+    Restarted,
+    /// Claude is still running in the window: nothing was started.
+    Running,
+}
+
+/// Makes sure Claude runs in the window `name`: creates the window, restarts Claude in it when it has exited
+/// (same command, directory and environment as a fresh start), or leaves a running Claude alone.
+fn ensure_claude(
+    conn: &Connection,
+    tmux: &Tmux,
+    name: &str,
+    path: &str,
+    env: &[(&str, &str)],
+    cmd: &str,
+    session: Option<&str>,
+) -> Result<Launch> {
+    if cockpit_window(tmux, name, path, env, cmd)? {
+        return Ok(Launch::Created);
+    }
+    let pane = claude_pane(tmux, name).ok_or_else(|| anyhow!("{name} has no Claude pane"))?;
+    if running(&pane, session_live(conn, session, &pane.id)) {
+        return Ok(Launch::Running);
+    }
+    let mut a: Vec<String> = ["respawn-pane", "-k", "-t", &pane.id, "-c", path].map(String::from).to_vec();
+    for (k, v) in env {
+        a.extend(["-e".into(), format!("{k}={v}")]);
+    }
+    a.push(cmd.into());
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    tmux.run_env(CK, &a, clean_env(path))?;
+    Ok(Launch::Restarted)
 }
 
 /// Starts an interactive Claude session in a window of its own, without claiming a ticket.
+/// An existing window is reused; Claude is restarted in it when it has exited.
 pub fn run_claude(conn: &Connection, tmux: &Tmux, repo: &str, name: &str, prompt: &str) -> Result<String> {
     let path = tickets::repo_path(conn, repo)?.ok_or_else(|| anyhow!("unknown repo path for {repo}"))?;
-    cockpit_window(tmux, name, &path, &[("TK_PROMPT", prompt)], &claude_cmd())?;
+    ensure_claude(conn, tmux, name, &path, &[("TK_PROMPT", prompt)], &claude_cmd(&claude_bin()), None)?;
     Ok(format!("cockpit:{name}"))
 }
 
 /// Starts the ticket's session: window named after the key in the repo's main path, `TK_ISSUE` set.
-pub fn start_ticket(conn: &Connection, tmux: &Tmux, key: &str) -> Result<String> {
+/// Idempotent: a running Claude is left alone (`started: false`), an exited one is restarted in its window.
+pub fn start_ticket(conn: &Connection, tmux: &Tmux, key: &str) -> Result<Value> {
+    start_ticket_with(conn, tmux, key, &claude_bin())
+}
+
+fn start_ticket_with(conn: &Connection, tmux: &Tmux, key: &str, claude: &str) -> Result<Value> {
     let t = tickets::get(conn, key)?;
     let path = tickets::repo_path(conn, &t.repo)?.ok_or_else(|| anyhow!("unknown repo path for {}", t.repo))?;
     let prompt = format!("Work on ticket {}: {}. Read it with the tracker's show command first.", t.key, t.title);
-    if !cockpit_window(tmux, &t.key, &path, &[("TK_ISSUE", &t.key), ("TK_PROMPT", &prompt)], &claude_cmd())? {
-        bail!("{} already has a window", t.key);
+    let env = [("TK_ISSUE", t.key.as_str()), ("TK_PROMPT", prompt.as_str())];
+    let window = format!("cockpit:{}", t.key);
+    match ensure_claude(conn, tmux, &t.key, &path, &env, &claude_cmd(claude), t.session.as_deref())? {
+        Launch::Running => Ok(json!({"window": window, "started": false, "reason": "already running"})),
+        Launch::Restarted => {
+            tickets::event(conn, key, None, "restarted", &format!("tmux {window}"))?;
+            Ok(json!({"window": window, "started": true, "restarted": true}))
+        }
+        Launch::Created => {
+            tickets::event(conn, key, None, "dispatched", &format!("tmux {window}"))?;
+            if settings::get_bool(conn, "start_services_on_dispatch") && t.project.is_some() {
+                let _ = up(conn, tmux, &Sel { key: Some(t.key.clone()), caller_pane: None });
+                // no defaults for the project: nothing to start
+            }
+            Ok(json!({"window": window, "started": true}))
+        }
     }
-    tickets::event(conn, key, None, "dispatched", &format!("tmux cockpit:{}", t.key))?;
-    if settings::get_bool(conn, "start_services_on_dispatch") && t.project.is_some() {
-        let _ = up(conn, tmux, &Sel { key: Some(t.key.clone()), caller_pane: None });
-        // no defaults for the project: nothing to start
-    }
-    Ok(format!("cockpit:{}", t.key))
 }
 
 pub fn window_id(tmux: &Tmux, sel: &Sel) -> Result<String> {
@@ -114,7 +217,7 @@ pub fn window_id(tmux: &Tmux, sel: &Sel) -> Result<String> {
 
 /// Panes of a window; the queue pane visits windows and is not part of them.
 pub fn panes_in(tmux: &Tmux, window: &str) -> Result<Vec<PaneInfo>> {
-    let fmt = "#{pane_id}\t#{@tk_name}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{@tk_queue}";
+    let fmt = "#{pane_id}\t#{@tk_name}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{@tk_queue}\t#{@tk_run}";
     let out = tmux.run(CK, &["list-panes", "-t", window, "-F", fmt])?;
     Ok(out
         .lines()
@@ -128,10 +231,36 @@ pub fn panes_in(tmux: &Tmux, window: &str) -> Result<Vec<PaneInfo>> {
                 cwd: f[3].into(),
                 dead: f[4] == "1",
                 queue: f[5] == "1",
+                run: f[6].into(),
             }
         })
         .filter(|p| !p.queue)
         .collect())
+}
+
+/// Every window of the cockpit session except the home window, each with its Claude pane.
+pub fn windows(tmux: &Tmux) -> Vec<WindowInfo> {
+    let fmt =
+        "#{window_name}\t#{pane_id}\t#{@tk_queue}\t#{@tk_name}\t#{pane_current_command}\t#{pane_dead}\t#{@tk_run}";
+    let out = tmux.quiet(CK, &["list-panes", "-s", "-t", &format!("={SESSION}"), "-F", fmt]);
+    let mut v: Vec<WindowInfo> = vec![];
+    for l in out.lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() < 7 || f[0] == HOME_WINDOW || f[2] == "1" || !f[3].is_empty() || v.iter().any(|w| w.name == f[0]) {
+            continue;
+        }
+        let p = PaneInfo {
+            id: f[1].into(),
+            name: None,
+            command: f[4].into(),
+            cwd: String::new(),
+            dead: f[5] == "1",
+            queue: false,
+            run: f[6].into(),
+        };
+        v.push(WindowInfo { name: f[0].into(), pane: format!("cockpit:{}", p.id), claude: running(&p, false) });
+    }
+    v
 }
 
 fn pane_named(tmux: &Tmux, window: &str, name: &str) -> Result<Option<PaneInfo>> {
@@ -251,11 +380,106 @@ mod tests {
             tickets::NewTicket { repo: "demo".into(), title: "Start me".into(), ..Default::default() },
         )
         .unwrap();
-        assert_eq!(start_ticket(&c, t, &key).unwrap(), format!("cockpit:{key}"));
+        let r = start_ticket(&c, t, &key).unwrap();
+        assert_eq!(
+            (r["window"].as_str(), r["started"].as_bool()),
+            (Some(format!("cockpit:{key}").as_str()), Some(true))
+        );
         assert!(window_exists(t, &key));
         assert!(tickets::events(&c, &key).unwrap().iter().any(|e| e["kind"] == "dispatched"));
-        let again = start_ticket(&c, t, &key).unwrap_err().to_string();
-        assert!(again.contains("already has a window"), "{again}");
+    }
+
+    const SLEEPER: &str = "sh -c 'exec sleep 60' --";
+
+    fn demo_ticket(c: &Connection) -> String {
+        c.execute("INSERT INTO repos(name,path) VALUES('demo', ?)", [std::env::temp_dir().to_string_lossy()]).unwrap();
+        tickets::create(c, tickets::NewTicket { repo: "demo".into(), title: "T".into(), ..Default::default() }).unwrap()
+    }
+
+    fn run_of(t: &Tmux, key: &str) -> String {
+        claude_pane(t, key).map(|p| p.run).unwrap_or_default()
+    }
+
+    #[test]
+    fn starting_a_running_ticket_does_nothing() {
+        let Some(g) = guard() else { return };
+        let t = &g.0;
+        let (_d, c) = temp_db();
+        let key = demo_ticket(&c);
+        assert_eq!(start_ticket_with(&c, t, &key, SLEEPER).unwrap()["started"], true);
+        assert!(wait_until(|| run_of(t, &key) == "1"));
+        let pane = claude_pane(t, &key).unwrap().id;
+        let r = start_ticket_with(&c, t, &key, SLEEPER).unwrap();
+        assert_eq!(r, json!({"window": format!("cockpit:{key}"), "started": false, "reason": "already running"}));
+        assert_eq!(claude_pane(t, &key).unwrap().id, pane);
+        assert_eq!(run_of(t, &key), "1", "the running session was not touched");
+        assert!(windows(t).iter().any(|w| w.name == key && w.claude));
+    }
+
+    #[test]
+    fn starting_after_claude_exited_restarts_it_in_the_same_window() {
+        let Some(g) = guard() else { return };
+        let t = &g.0;
+        let (d, c) = temp_db();
+        let key = demo_ticket(&c);
+        // `true` exits at once: the window is left with its shell
+        assert_eq!(start_ticket_with(&c, t, &key, "true").unwrap()["started"], true);
+        assert!(wait_until(|| run_of(t, &key) == "0"));
+        let w = windows(t);
+        assert_eq!((w.len(), w[0].name.as_str(), w[0].claude), (1, key.as_str(), false));
+        let win = window_id(t, &Sel { key: Some(key.clone()), caller_pane: None }).unwrap();
+
+        // the stand-in records what it was started with
+        let out = d.path().join("env.txt");
+        let probe = format!("sh -c 'echo \"$TK_ISSUE $TK_PROMPT $(pwd -P)\" > {}; exec sleep 60' --", out.display());
+        let r = start_ticket_with(&c, t, &key, &probe).unwrap();
+        assert_eq!(r, json!({"window": format!("cockpit:{key}"), "started": true, "restarted": true}));
+        assert!(wait_until(|| run_of(t, &key) == "1"));
+        let sel = Sel { key: Some(key.clone()), caller_pane: None };
+        assert_eq!(window_id(t, &sel).unwrap(), win);
+        assert_eq!(list(t, &sel).unwrap().len(), 1);
+        assert!(tickets::events(&c, &key).unwrap().iter().any(|e| e["kind"] == "restarted"));
+        assert!(wait_until(|| std::fs::metadata(&out).is_ok_and(|m| m.len() > 0)));
+        let seen = std::fs::read_to_string(&out).unwrap();
+        let repo = std::env::temp_dir().canonicalize().unwrap();
+        assert_eq!(
+            seen.trim(),
+            format!("{key} Work on ticket {key}: T. Read it with the tracker's show command first. {}", repo.display())
+        );
+        assert!(windows(t)[0].claude);
+    }
+
+    #[test]
+    fn run_claude_reuses_its_window_and_restarts_an_exited_claude() {
+        let Some(g) = guard() else { return };
+        let t = &g.0;
+        let (_d, c) = temp_db();
+        demo_ticket(&c);
+        let path = tickets::repo_path(&c, "demo").unwrap().unwrap();
+        ensure_claude(&c, t, "Demo-housekeeping", &path, &[("TK_PROMPT", "p")], &claude_cmd("true"), None).unwrap();
+        assert!(wait_until(|| run_of(t, "Demo-housekeeping") == "0"));
+        let again = ensure_claude(&c, t, "Demo-housekeeping", &path, &[("TK_PROMPT", "p")], &claude_cmd(SLEEPER), None)
+            .unwrap();
+        assert_eq!(again, Launch::Restarted);
+        assert!(wait_until(|| run_of(t, "Demo-housekeeping") == "1"));
+        let again = ensure_claude(&c, t, "Demo-housekeeping", &path, &[("TK_PROMPT", "p")], &claude_cmd(SLEEPER), None)
+            .unwrap();
+        assert_eq!(again, Launch::Running);
+    }
+
+    #[test]
+    fn a_live_session_in_the_db_keeps_a_shell_window_running() {
+        let Some(g) = guard() else { return };
+        let t = &g.0;
+        let (_d, c) = temp_db();
+        let key = demo_ticket(&c);
+        start_ticket_with(&c, t, &key, "true").unwrap();
+        assert!(wait_until(|| run_of(t, &key) == "0"));
+        c.execute("INSERT INTO sessions(id,repo,cwd,state) VALUES('s1','demo','/x','turn')", []).unwrap();
+        c.execute("UPDATE tickets SET session='s1' WHERE key=?", [&key]).unwrap();
+        assert_eq!(start_ticket_with(&c, t, &key, SLEEPER).unwrap()["started"], false);
+        c.execute("UPDATE sessions SET state='ended' WHERE id='s1'", []).unwrap();
+        assert_eq!(start_ticket_with(&c, t, &key, SLEEPER).unwrap()["restarted"], true);
     }
 
     #[test]

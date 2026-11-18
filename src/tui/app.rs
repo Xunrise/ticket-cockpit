@@ -371,8 +371,17 @@ impl App {
         }
     }
 
+    /// `s`: starts the ticket's session, restarts Claude in its window when it exited, or just goes there
+    /// when it is already running.
     pub fn start_ticket(&mut self, key: &str) {
         self.flash = match self.tool("ticket.start", json!({"key": key})) {
+            Ok(r) if r["started"] == false => {
+                if let Some(row) = self.rows.iter().find(|r| r.key == key && r.section < queue::READY) {
+                    self.sel_id = row.id.clone();
+                }
+                format!("{key} is already running")
+            }
+            Ok(r) if r["restarted"] == true => format!("restarted {key}"),
             Ok(_) => format!("started {key}"),
             Err(e) => e,
         };

@@ -143,9 +143,9 @@ pub const TOOLS: &[Tool] = &[
     Tool { name: "ticket.links", desc: "Context linked to a ticket", params: &[("key", "ticket key")], run: |c, a| tickets::links(&c.db()?, &str_arg(&a, "key")?).map(Value::Array) },
     Tool {
         name: "ticket.start",
-        desc: "Start a Claude session for a ticket in its own window of the cockpit's tmux",
+        desc: "Start a Claude session for a ticket in its own window of the cockpit's tmux; restarts Claude when it exited in that window, does nothing when it is running",
         params: &[("key", "ticket key")],
-        run: |c, a| Ok(json!({"window": panes::start_ticket(&c.db()?, &c.tmux, &str_arg(&a, "key")?)?})),
+        run: |c, a| panes::start_ticket(&c.db()?, &c.tmux, &str_arg(&a, "key")?),
     },
     Tool {
         name: "ticket.link_meeting",
