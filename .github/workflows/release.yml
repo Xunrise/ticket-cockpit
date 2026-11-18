@@ -6,7 +6,7 @@ permissions:
   contents: write
 jobs:
   test:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -17,7 +17,7 @@ jobs:
       - run: cargo test
   build:
     needs: test
-    runs-on: macos-14
+    runs-on: macos-latest
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
