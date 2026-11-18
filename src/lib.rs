@@ -3,6 +3,7 @@ pub mod connections;
 pub mod ctx;
 pub mod daemon;
 pub mod db;
+pub mod errors;
 pub mod http;
 pub mod install;
 pub mod onboard;

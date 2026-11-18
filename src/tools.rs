@@ -207,6 +207,16 @@ pub const TOOLS: &[Tool] = &[
             Ok(fresh)
         },
     },
+    Tool {
+        name: "cockpit.log_error",
+        desc: "Record an error in the cockpit's error log",
+        params: &[("text", "the error"), ("context", "optional where it happened")],
+        run: |c, a| {
+            crate::errors::log(&c.db()?, "session", &str_arg(&a, "text")?, &opt_str(&a, "context").unwrap_or_default())?;
+            Ok(json!({"ok": true}))
+        },
+    },
+    Tool { name: "cockpit.errors", desc: "The last 50 errors of the cockpit", params: &[], run: |c, _| crate::errors::recent(&c.db()?, 50).map(Value::Array) },
     Tool { name: "pane.list", desc: "Panes in a ticket's cockpit window", params: &[PANE_KEY], run: |c, a| Ok(serde_json::to_value(panes::list(&c.tmux, &sel(&a))?)?) },
     Tool {
         name: "pane.run",
@@ -348,9 +358,19 @@ fn for_change(
     Ok(json!({"match": null, "ticket": null}))
 }
 
+/// Runs a tool. Every failure lands in the error log here, the one place HTTP and CLI calls share.
 pub fn call(ctx: &Ctx, name: &str, args: Value) -> Result<Value> {
-    let tool = TOOLS.iter().find(|t| t.name == name).ok_or_else(|| anyhow!("no tool {name}"))?;
-    (tool.run)(ctx, if args.is_null() { json!({}) } else { args })
+    let context = crate::util::truncate(&args.to_string(), 200);
+    let result = match TOOLS.iter().find(|t| t.name == name) {
+        Some(tool) => (tool.run)(ctx, if args.is_null() { json!({}) } else { args }),
+        None => Err(anyhow!("no tool {name}")),
+    };
+    if let Err(e) = &result {
+        if !crate::errors::expected(e) && name != "cockpit.log_error" {
+            crate::errors::log_quiet(ctx, "tool", &format!("{name}: {e:#}"), &context);
+        }
+    }
+    result
 }
 
 pub fn describe() -> Value {
