@@ -49,6 +49,19 @@ pub fn status(repo: &str, installed: &str) -> Value {
     json!({"head": head, "available": (ahead > 0).then_some(head.clone()), "commits_ahead": ahead, "behind_remote": behind, "summary": summary, "notes": notes})
 }
 
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// What the local channel runs: build and install from the checkout, then re-register with `cockpit install`.
+pub fn install_script(repo: &str, exe: &str) -> String {
+    format!("cd {} && git log --oneline -1 && cargo install --path . && {} install", quote(repo), quote(exe))
+}
+
+pub fn steps(repo: &str) -> Vec<String> {
+    vec![format!("cd {repo}"), "git log --oneline -1".into(), "cargo install --path .".into(), "cockpit install".into()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -239,6 +239,28 @@ pub const TOOLS: &[Tool] = &[
         params: &[("refresh", "optional true to check now")],
         run: |c, a| crate::update::status(c, a["refresh"].as_bool().unwrap_or(false)),
     },
+    Tool {
+        name: "cockpit.update",
+        desc: "Update the cockpit (local: build from cockpit_repo main; release: download the latest release) in a visible window, then reload. dry_run lists the steps",
+        params: &[("dry_run", "optional true: only list the steps")],
+        run: |c, a| {
+            if a["dry_run"].as_bool().unwrap_or(false) {
+                return Ok(json!({"steps": crate::update::update_steps(c)}));
+            }
+            crate::update::open_window(c, "cockpit-update", "update")
+        },
+    },
+    Tool {
+        name: "cockpit.reload",
+        desc: "Restart the daemon and replace the queue with the installed binary, in a visible window. dry_run lists the steps",
+        params: &[("dry_run", "optional true: only list the steps")],
+        run: |c, a| {
+            if a["dry_run"].as_bool().unwrap_or(false) {
+                return Ok(json!({"steps": crate::update::reload_steps()}));
+            }
+            crate::update::open_window(c, "cockpit-reload", "reload")
+        },
+    },
     Tool { name: "cockpit.errors", desc: "The last 50 errors of the cockpit", params: &[], run: |c, _| crate::errors::recent(&c.db()?, 50).map(Value::Array) },
     Tool { name: "pane.list", desc: "Panes in a ticket's cockpit window", params: &[PANE_KEY], run: |c, a| Ok(serde_json::to_value(panes::list(&c.tmux, &sel(&a))?)?) },
     Tool {
