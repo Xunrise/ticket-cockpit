@@ -3,6 +3,7 @@
 pub mod api;
 pub mod app;
 pub mod bindings;
+pub mod projects;
 pub mod queue;
 pub mod travel;
 pub mod widgets;

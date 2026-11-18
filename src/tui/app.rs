@@ -1,13 +1,14 @@
 //! The queue's state, its refresh tick and key routing.
 use super::api::{is_down, Api};
 use super::bindings;
+use super::projects;
 use super::queue::{self, Row, READY};
 use super::travel::Travel;
 use super::widgets::{input_line, picker_key, render_picker, str, tabs_line, Pick, Picker, PickerKey};
 use crate::tmux::Tmux;
 use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyEventKind},
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style, Stylize},
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -18,7 +19,10 @@ use serde_json::{json, Value};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tab {
     Queue,
+    Projects,
 }
+
+const TAB_ORDER: [Tab; 2] = [Tab::Queue, Tab::Projects];
 
 pub struct App {
     pub api: Api,
@@ -35,6 +39,7 @@ pub struct App {
     pub flash: String,
     /// The reply line (`r`).
     pub input: Option<String>,
+    pub projects: projects::State,
     pub picker: Option<Picker>,
     pub show_help: bool,
     /// Set while the daemon does not answer.
@@ -65,6 +70,7 @@ impl App {
             context: vec![],
             flash: String::new(),
             input: None,
+            projects: Default::default(),
             picker: None,
             show_help: false,
             down: None,
@@ -117,6 +123,9 @@ impl App {
         }
         if self.down.is_none() {
             self.refresh_context();
+            if self.tab == Tab::Projects {
+                self.refresh_projects();
+            }
         }
         if self.travel.is_some() {
             self.tick_tmux();
@@ -135,8 +144,10 @@ impl App {
         }
         let focus = self.focus();
         let width = self.setting("queue_width").as_i64().unwrap_or(38);
-        travel.show_slot(&self.slot_key(), || self.slot_text());
-        let out = travel.sync(focus.as_ref(), &self.rows, &self.sel_id, false, width, &self.replies());
+        let focus_pane = focus.as_ref().is_some_and(|r| r.cockpit_pane.is_some());
+        travel.show_slot(&self.slot_key(focus_pane), || self.slot_text());
+        let out =
+            travel.sync(focus.as_ref(), &self.rows, &self.sel_id, self.tab == Tab::Projects, width, &self.replies());
         if let Some(id) = out.select {
             self.sel_id = id;
         }
@@ -145,17 +156,31 @@ impl App {
     }
 
     /// The row whose window the queue should sit in.
+    /// In the projects tab the selected ticket decides: its live session's window, else the ticket itself in the home window.
     fn focus(&self) -> Option<Row> {
-        self.cur().cloned()
+        match self.tab {
+            Tab::Queue => self.cur().cloned(),
+            Tab::Projects => self.project_focus(),
+        }
     }
 
     /// Identifies what the home window's right pane shows, so it is redrawn only when that changes.
-    fn slot_key(&self) -> String {
-        String::new()
+    fn slot_key(&self, focus_pane: bool) -> String {
+        match self.tab {
+            Tab::Projects if !focus_pane => self.projects.cur().map(|p| p.key.clone()).unwrap_or_default(),
+            _ => String::new(),
+        }
     }
 
     fn slot_text(&self) -> String {
-        "\n  no live tmux session selected\n".to_string()
+        let key = self.slot_key(false);
+        if self.tab != Tab::Projects || key.is_empty() {
+            return "\n  no live tmux session selected\n".to_string();
+        }
+        match self.tool("ticket.get", json!({"key": key})) {
+            Ok(t) => projects::ticket_text(&t),
+            Err(e) => format!("\n  {e}\n"),
+        }
     }
 
     fn refresh_context(&mut self) {
@@ -234,11 +259,34 @@ impl App {
             }
             return;
         }
-        if k.code == KeyCode::Char('?') {
-            self.show_help = !self.show_help;
-            return;
+        if self.projects.input.is_some() {
+            return self.projects_input_key(k);
         }
-        self.queue_key(k);
+        match k.code {
+            KeyCode::Char('?') => self.show_help = !self.show_help,
+            // q leaves the cockpit (it keeps running, like a daemon); Q stops the queue itself
+            KeyCode::Char('q') => match &self.travel {
+                Some(t) => t.detach_clients(),
+                None => self.quit = true,
+            },
+            KeyCode::Char('Q') => self.quit = true,
+            KeyCode::Tab => self.cycle(1),
+            KeyCode::BackTab => self.cycle(TAB_ORDER.len() - 1),
+            _ => {
+                match self.tab {
+                    Tab::Queue => self.queue_key(k),
+                    Tab::Projects => {
+                        self.projects_key(k);
+                    }
+                };
+            }
+        }
+    }
+
+    /// Tab cycles queue → projects → … → queue; the open project is kept.
+    fn cycle(&mut self, by: usize) {
+        let i = TAB_ORDER.iter().position(|t| *t == self.tab).unwrap_or(0);
+        self.tab = TAB_ORDER[(i + by) % TAB_ORDER.len()];
     }
 
     fn mv(&mut self, d: isize) {
@@ -249,15 +297,6 @@ impl App {
     fn queue_key(&mut self, k: KeyEvent) {
         let cur = self.cur().cloned();
         match k.code {
-            // q leaves the cockpit (it keeps running, like a daemon); Q stops the queue itself
-            KeyCode::Char('q') => {
-                if let Some(t) = &self.travel {
-                    t.detach_clients();
-                } else {
-                    self.quit = true;
-                }
-            }
-            KeyCode::Char('Q') => self.quit = true,
             KeyCode::Char('p') => match cur.filter(|r| !r.key.is_empty()) {
                 Some(r) => self.picker = self.project_picker(&r.key, false),
                 None => self.flash = "no ticket on this row".into(),
@@ -471,7 +510,19 @@ impl App {
                 };
                 None
             }
-            Pick::Cluster | Pick::OpenProject => None,
+            Pick::Cluster => {
+                self.flash = match self.tool("ticket.update", json!({"key": key, "cluster": v})) {
+                    Ok(_) => format!("{key} → ▸ {v}"),
+                    Err(e) => e,
+                };
+                None
+            }
+            Pick::OpenProject => {
+                self.projects.open = Some(v.to_string());
+                self.projects.psel = 0;
+                self.projects.filter.clear();
+                None
+            }
         }
     }
 
@@ -480,6 +531,10 @@ impl App {
     pub fn draw(&self, f: &mut Frame) {
         let [main, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(4)]).areas(f.area());
         let [left, right] = Layout::vertical([Constraint::Min(5), Constraint::Length(12)]).areas(main);
+        if self.tab == Tab::Projects {
+            self.draw_projects(f, left, right);
+            return self.draw_overlays(f, main, bar);
+        }
         let tabs = tabs_line(0);
         let mut items = vec![ListItem::new(tabs), ListItem::new("")];
         let mut sel = None;
@@ -507,6 +562,10 @@ impl App {
                 right,
             );
         }
+        self.draw_overlays(f, main, bar);
+    }
+
+    fn draw_overlays(&self, f: &mut Frame, main: Rect, bar: Rect) {
         if let Some(p) = &self.picker {
             render_picker(f, main, p);
         }
@@ -517,11 +576,18 @@ impl App {
         if let Some(t) = &self.input {
             return input_line("reply", t);
         }
+        if let Some(l) = self.projects_input_line() {
+            return l;
+        }
         if !self.flash.is_empty() {
             return Line::from(format!(" {}", self.flash)).yellow();
         }
         if self.show_help {
-            return Line::from(" ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · s start · p project · l link meeting · r reply (quick replies) · 1-4 pick · a accept · x interrupt · q leave · Q stop queue").dim();
+            return Line::from(match self.tab {
+                Tab::Queue => " ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · , settings · s start · p project · l link meeting · r reply (quick replies) · 1-4 pick · a accept · x interrupt · q leave · Q stop queue",
+                Tab::Projects => self.projects_help(),
+            })
+            .dim();
         }
         Line::from(" ⇥ tabs · ? all keys · q leave").dim()
     }
@@ -561,7 +627,7 @@ pub mod tests {
         assert_eq!(
             &s[..12],
             [
-                " queue   ⇥",
+                " queue   projects   ⇥",
                 "",
                 "NEEDS YOU 1",
                 " DEM-1  Login 42m",
@@ -630,5 +696,122 @@ pub mod tests {
         let s = screen(&a, 70, 20);
         assert_eq!(s[2], " daemon not running: cockpit daemon start");
         assert_eq!(s[3], "   waiting for http://127.0.0.1:1");
+    }
+
+    fn with_projects() -> App {
+        let mut a = app();
+        a.projects.list = vec![
+            json!({"name": "Demo", "planned": 2, "doing": 1, "done": 1, "palaver": "Demo Palaver"}),
+            json!({"name": "Docs", "planned": 0, "doing": 0, "done": 0, "palaver": null}),
+        ];
+        a
+    }
+
+    #[test]
+    fn projects_list_then_view_and_back() {
+        let mut a = with_projects();
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.tab, Tab::Projects);
+        let s = screen(&a, 80, 30);
+        assert_eq!(
+            &s[..7],
+            [
+                " queue   projects   ⇥",
+                "PROJECTS 2",
+                "",
+                " ◆ Demo",
+                "     ○ 2 planned · ◐ 1 in progress · ✓ 1 done · Palaver: Demo Palaver",
+                " ◆ Docs",
+                "     ○ 0 planned · ◐ 0 in progress · ✓ 0 done",
+            ]
+        );
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.projects.open.as_deref(), Some("Demo"));
+        a.projects.set_overview(projects::sample_overview());
+        assert_eq!(a.projects.psel, 2, "the cursor skips headers");
+        let s = screen(&a, 80, 30);
+        assert_eq!(
+            &s[..12],
+            [
+                " queue   projects   ⇥",
+                "◆ Demo",
+                "",
+                "PLANNED 2",
+                "  ▸ auth",
+                " ○ DEM-2  Ready one",
+                "     P1 · ▸ auth",
+                "   [s] start  [g] cluster",
+                "  ▸ unsorted",
+                " ○ DEM-3  Polish",
+                "     P3",
+                "",
+            ]
+        );
+        assert!(s.iter().any(|l| l == "do it"), "the body of the selected ticket");
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(a.projects.cur().map(|r| r.key.as_str()), Some("DEM-1"));
+        assert!(screen(&a, 80, 40).iter().any(|l| l == "   [⏎] open session  [g] cluster"));
+        // ⏎ on a ticket with a live session opens it in the queue
+        press(&mut a, KeyCode::Enter);
+        assert_eq!((a.tab, a.sel_id.as_str()), (Tab::Queue, "s1"));
+    }
+
+    #[test]
+    fn tab_cycling_keeps_the_open_project() {
+        let mut a = with_projects();
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Enter);
+        a.projects.set_overview(projects::sample_overview());
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.tab, Tab::Queue);
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.tab, Tab::Projects);
+        assert_eq!(a.projects.open.as_deref(), Some("Demo"));
+        // esc goes back to the list; o opens the fuzzy picker
+        press(&mut a, KeyCode::Char('o'));
+        assert!(a.picker.is_some());
+        for c in "doc".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.projects.open.as_deref(), Some("Docs"));
+        press(&mut a, KeyCode::Esc);
+        assert!(a.projects.open.is_none());
+    }
+
+    #[test]
+    fn filter_narrows_locally_while_typing() {
+        let mut a = with_projects();
+        a.tab = Tab::Projects;
+        a.projects.open = Some("Demo".into());
+        a.projects.set_overview(projects::sample_overview());
+        press(&mut a, KeyCode::Char('/'));
+        for c in "pol".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        let s = screen(&a, 80, 30);
+        assert_eq!(s[1], "◆ Demo   / pol");
+        assert!(s.iter().any(|l| l.contains("DEM-3  Polish")) && !s.iter().any(|l| l.contains("DEM-2")));
+        assert!(s.iter().any(|l| l == "filter › pol▏"));
+        press(&mut a, KeyCode::Esc);
+        assert!(a.projects.filter.is_empty());
+        assert!(screen(&a, 80, 30).iter().any(|l| l.contains("DEM-2")));
+    }
+
+    #[test]
+    fn cluster_picker_offers_a_new_cluster_last() {
+        let mut a = with_projects();
+        a.tab = Tab::Projects;
+        a.projects.open = Some("Demo".into());
+        a.projects.set_overview(projects::sample_overview());
+        press(&mut a, KeyCode::Char('g'));
+        for c in "a".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        let shown: Vec<String> = a.picker.as_ref().unwrap().shown().into_iter().map(|x| x.0).collect();
+        assert_eq!(shown, ["▸ auth", "+ new cluster \"a\""]);
+        let s = screen(&a, 80, 30);
+        assert!(s.iter().any(|l| l.contains("Cluster for DEM-2 (type to create)")));
     }
 }
