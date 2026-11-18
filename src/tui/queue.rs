@@ -193,7 +193,12 @@ pub fn row_hints(r: &Row) -> Vec<(&'static str, String)> {
         TURN => vec![("r", "reply".into())],
         WORKING => vec![("x", "interrupt".into())],
         ENDED => vec![("s", "restart session".into()), ("⏎", "open window".into())],
-        _ => vec![("s", "start".into()), ("p", "project".into()), ("l", "meeting".into())],
+        _ => vec![
+            ("s", "start".into()),
+            ("S", "start in background".into()),
+            ("p", "project".into()),
+            ("l", "meeting".into()),
+        ],
     };
     if r.section < READY && r.pane {
         h.insert(0, ("⏎", "attach".into()));
@@ -345,7 +350,7 @@ mod tests {
         assert_eq!(keys(&r[0]), ["⏎", "1-4", "a", "r", "x"]);
         assert_eq!(keys(&r[1]), ["⏎", "r"]);
         assert_eq!(keys(&r[2]), ["⏎", "x"]);
-        assert_eq!(keys(&r[3]), ["s", "p", "l"]);
+        assert_eq!(keys(&r[3]), ["s", "S", "p", "l"]);
         let q = vec![('c', "continue".to_string())];
         let strip = |s: String| s.replace("#[fg=blue,bold]", "<").replace("#[default]", ">");
         assert_eq!(

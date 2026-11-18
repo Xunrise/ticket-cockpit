@@ -82,7 +82,7 @@ pub fn is_down(e: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     #[test]
@@ -93,14 +93,16 @@ mod tests {
     }
 
     /// Answers each request with the next canned `(status line, body)`.
-    fn canned(responses: Vec<(&'static str, &'static str)>) -> Api {
+    pub fn canned(responses: Vec<(&'static str, &'static str)>) -> Api {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         std::thread::spawn(move || {
             for ((status, body), s) in responses.into_iter().zip(l.incoming().flatten()) {
                 let mut s = s;
-                let _ = s.read(&mut [0u8; 2048]);
+                // take the whole request (headers and body may arrive apart) before answering
+                let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+                while s.read(&mut [0u8; 2048]).is_ok_and(|n| n > 0) {}
                 let _ =
                     write!(s, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             }

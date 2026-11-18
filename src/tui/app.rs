@@ -51,6 +51,8 @@ pub struct App {
     pub down: Option<String>,
     /// The daemon is another build than this queue: shown as a one-line notice.
     pub stale_daemon: bool,
+    /// `(ticket key, since)`: a session was just started for it; select its row when it appears.
+    pending: Option<(String, i64)>,
     /// Refresh on the next loop turn (after an action).
     pub refresh: bool,
     pub quit: bool,
@@ -84,6 +86,7 @@ impl App {
             show_help: false,
             down: None,
             stale_daemon: false,
+            pending: None,
             refresh: true,
             quit: false,
             now: now_secs(),
@@ -114,8 +117,11 @@ impl App {
     pub fn load_state(&mut self, st: &Value) {
         self.rows = queue::rows(st);
         self.windows = st["windows"].as_array().cloned().unwrap_or_default();
+        self.resolve_pending();
         let i = self.idx();
-        self.sel_id = self.rows.get(i).map(|r| r.id.clone()).unwrap_or_default();
+        if self.pending.is_none() {
+            self.sel_id = self.rows.get(i).map(|r| r.id.clone()).unwrap_or_default();
+        }
     }
 
     /// One refresh: data from the daemon, tmux bindings, where the queue sits.
@@ -173,7 +179,7 @@ impl App {
     /// In the projects tab the selected ticket decides: its live session's window, else the ticket itself in the home window.
     fn focus(&self) -> Option<Row> {
         match self.tab {
-            Tab::Queue => self.cur().cloned(),
+            Tab::Queue => self.pending_focus().or_else(|| self.cur().cloned()),
             Tab::Projects => self.project_focus(),
             Tab::Settings => None,
         }
@@ -257,6 +263,7 @@ impl App {
             return;
         }
         self.flash.clear();
+        self.pending = None; // the user took over
         self.refresh = true; // refresh right after an action
         if self.picker.is_some() {
             return self.picker_key(k);
@@ -366,9 +373,9 @@ impl App {
             KeyCode::Char(ch @ '1'..='4') => self.flash = self.send(json!({"keys": [ch.to_string()]})),
             KeyCode::Char('a') => self.flash = self.send(json!({"keys": ["Enter"]})),
             KeyCode::Char('x') => self.flash = self.send(json!({"keys": ["Escape"]})),
-            KeyCode::Char('s') => {
+            KeyCode::Char(c @ ('s' | 'S')) => {
                 if let Some(r) = cur.filter(|r| r.section == READY || r.section == ENDED) {
-                    self.start_ticket(&r.id);
+                    self.start_ticket(&r.id, c == 's');
                 }
             }
             KeyCode::Char(ch) => {
@@ -382,20 +389,52 @@ impl App {
         }
     }
 
-    /// `s`: starts the ticket's session, restarts Claude in its window when it exited, or just goes there
-    /// when it is already running.
-    pub fn start_ticket(&mut self, key: &str) {
+    /// `s` (`foreground`): starts the ticket's session, restarts Claude in its window when it exited, or finds it
+    /// running; then the queue tab takes over and follows the ticket until its session row shows up.
+    /// `S`: only starts it; tab, selection and focus stay.
+    pub fn start_ticket(&mut self, key: &str, foreground: bool) {
         self.flash = match self.tool("ticket.start", json!({"key": key})) {
-            Ok(r) if r["started"] == false => {
-                if let Some(row) = self.rows.iter().find(|r| r.key == key && r.section < ENDED) {
-                    self.sel_id = row.id.clone();
+            Ok(r) => {
+                if foreground {
+                    self.tab = Tab::Queue;
+                    self.pending = Some((key.to_string(), self.now));
+                    self.resolve_pending();
                 }
-                format!("{key} is already running")
+                if r["started"] == false {
+                    format!("{key} is already running")
+                } else if r["restarted"] == true {
+                    format!("restarted {key}")
+                } else {
+                    format!("started {key}")
+                }
             }
-            Ok(r) if r["restarted"] == true => format!("restarted {key}"),
-            Ok(_) => format!("started {key}"),
             Err(e) => e,
         };
+    }
+
+    /// Selects the live session row of the ticket being started, once it exists (the session id is unknown until
+    /// the SessionStart hook fires). Given up after two minutes.
+    fn resolve_pending(&mut self) {
+        let Some((key, since)) = self.pending.clone() else { return };
+        if self.now - since > 120 {
+            self.pending = None;
+        } else if let Some(r) = self.rows.iter().find(|r| r.key == key && r.section < ENDED) {
+            self.sel_id = r.id.clone();
+            self.pending = None;
+        }
+    }
+
+    /// Until the session row exists, the queue travels into the window of the ticket being started.
+    fn pending_focus(&self) -> Option<Row> {
+        let (key, _) = self.pending.as_ref()?;
+        let w = self.windows.iter().find(|w| str(w, "name") == key)?;
+        Some(
+            self.rows
+                .iter()
+                .find(|r| r.section == ENDED && &r.key == key)
+                .cloned()
+                .unwrap_or_else(|| queue::window_row(key, key, str(w, "pane"))),
+        )
     }
 
     // ---- pickers ---------------------------------------------------------------------------------------------
@@ -628,7 +667,7 @@ impl App {
         }
         if self.show_help {
             return Line::from(match self.tab {
-                Tab::Queue => " ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · , settings · s start · p project · l link meeting · r reply (quick replies) · 1-4 pick · a accept · x interrupt · q leave · Q stop queue",
+                Tab::Queue => " ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · , settings · s start · S start in background · p project · l link meeting · r reply (quick replies) · 1-4 pick · a accept · x interrupt · q leave · Q stop queue",
                 Tab::Projects => self.projects_help(),
                 Tab::Settings => " ⇥ queue · j/k move · ⏎ change · r default · q leave",
             })
@@ -724,6 +763,73 @@ pub mod tests {
         assert!(screen(&a, 70, 30).iter().any(|l| l == "no ticket DEM-9"));
     }
 
+    fn started_json() -> Vec<(&'static str, &'static str)> {
+        vec![("200 OK", r#"{"window":"cockpit:DEM-2","started":true}"#)]
+    }
+
+    #[test]
+    fn s_goes_to_the_queue_and_follows_the_ticket_until_its_session_appears() {
+        let mut a = app();
+        a.api = super::super::api::tests::canned(started_json());
+        a.tab = Tab::Projects;
+        a.projects.open = Some("Demo".into());
+        a.projects.set_overview(projects::sample_overview());
+        a.projects.psel = a.projects.rows.iter().position(|r| r.key == "DEM-2").unwrap();
+        press(&mut a, KeyCode::Char('s'));
+        assert_eq!((a.tab, a.flash.as_str()), (Tab::Queue, "started DEM-2"));
+        // no session yet: the queue travels into the window, and a refresh does not move the selection away
+        let mut st = queue::sample_state();
+        st["windows"] = json!([{"name": "DEM-2", "pane": "cockpit:%20", "claude": true}]);
+        a.load_state(&st);
+        assert_eq!(a.focus().and_then(|r| r.cockpit_pane), Some("%20".into()));
+        // the SessionStart hook fired: the session claims the ticket and its row is selected
+        st["tickets"][1]["status"] = json!("doing");
+        st["tickets"][1]["session"] = json!("s9");
+        st["sessions"].as_array_mut().unwrap().push(json!({"id": "s9", "state": "turn", "state_at": "2026-11-18T09:40:00Z", "repo": "demo", "tmux_pane": "cockpit:%20", "git": {}}));
+        st["where"]["cockpit:%20"] = json!("cockpit:DEM-2");
+        st["ready"] = json!([]);
+        a.load_state(&st);
+        assert_eq!(a.sel_id, "s9");
+        assert!(a.pending.is_none());
+        // a key press before that takes over: nothing is selected behind the user's back
+        a.pending = Some(("DEM-9".into(), a.now));
+        press(&mut a, KeyCode::Char('j'));
+        assert!(a.pending.is_none());
+    }
+
+    #[test]
+    fn shift_s_starts_without_moving_anything() {
+        let mut a = app();
+        a.api = super::super::api::tests::canned(started_json());
+        a.sel_id = "DEM-2".into();
+        press(&mut a, KeyCode::Char('S'));
+        assert_eq!((a.tab, a.sel_id.as_str(), a.flash.as_str()), (Tab::Queue, "DEM-2", "started DEM-2"));
+        assert!(a.pending.is_none());
+        a.api = super::super::api::tests::canned(started_json());
+        a.tab = Tab::Projects;
+        a.projects.open = Some("Demo".into());
+        a.projects.set_overview(projects::sample_overview());
+        a.projects.psel = a.projects.rows.iter().position(|r| r.key == "DEM-3").unwrap();
+        press(&mut a, KeyCode::Char('S'));
+        assert_eq!((a.tab, a.flash.as_str()), (Tab::Projects, "started DEM-3"));
+        assert!(a.pending.is_none());
+    }
+
+    #[test]
+    fn already_running_selects_the_live_row_at_once() {
+        let mut a = app();
+        a.api = super::super::api::tests::canned(vec![(
+            "200 OK",
+            r#"{"window":"cockpit:DEM-1","started":false,"reason":"already running"}"#,
+        )]);
+        a.tab = Tab::Projects;
+        a.projects.open = Some("Demo".into());
+        a.projects.set_overview(projects::sample_overview());
+        a.projects.psel = a.projects.rows.iter().position(|r| r.key == "DEM-1").unwrap();
+        press(&mut a, KeyCode::Char('s'));
+        assert_eq!((a.tab, a.sel_id.as_str(), a.flash.as_str()), (Tab::Queue, "s1", "DEM-1 is already running"));
+    }
+
     #[test]
     fn moving_the_selection_moves_the_chips_and_the_detail() {
         let mut a = app();
@@ -732,7 +838,7 @@ pub mod tests {
         }
         assert_eq!(a.cur().map(|r| r.id.as_str()), Some("DEM-2"));
         let s = screen(&a, 70, 40);
-        assert!(s.iter().any(|l| l == "   [s] start  [p] project  [l] meeting"), "{s:#?}");
+        assert!(s.iter().any(|l| l == "   [s] start  [S] start in background  [p] project  [l] meeting"), "{s:#?}");
         assert!(s.iter().any(|l| l == "do it"));
         // going past the end stays on the last row; k goes back
         press(&mut a, KeyCode::Char('j'));
@@ -816,7 +922,7 @@ pub mod tests {
                 "  ▸ auth",
                 " ○ DEM-2  Ready one",
                 "     P1 · ▸ auth",
-                "   [s] start  [g] cluster",
+                "   [s] start  [S] start in background  [g] cluster",
                 "  ▸ unsorted",
                 " ○ DEM-3  Polish",
                 "     P3",

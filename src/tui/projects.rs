@@ -114,7 +114,7 @@ pub fn ticket_text(t: &Value) -> String {
             );
         }
     }
-    o + "\n  \x1b[2ms starts a session · g cluster · n new task\x1b[0m\n"
+    o + "\n  \x1b[2ms starts a session (S in the background) · g cluster · n new task\x1b[0m\n"
 }
 
 #[derive(Default)]
@@ -312,9 +312,9 @@ impl App {
                     };
                 }
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char(c @ ('s' | 'S')) => {
                 if let Some(r) = cur.filter(|r| r.status != "done" && r.status != "canceled") {
-                    self.start_ticket(&r.key);
+                    self.start_ticket(&r.key, c == 's');
                 }
             }
             KeyCode::Enter => match cur {
@@ -391,6 +391,7 @@ impl App {
                         }
                         if r.status == "todo" || r.status == "backlog" {
                             h.push(("s", "start".into()));
+                            h.push(("S", "start in background".into()));
                         }
                         if r.status != "done" {
                             h.push(("g", "cluster".into()));
@@ -433,7 +434,7 @@ impl App {
         if self.projects.open.is_none() {
             " ⇥ tabs · j/k move · ⏎ open project · , settings · q leave"
         } else {
-            " ⇥ tabs · esc projects · o switch project · j/k move · / filter · n new task · g cluster · H let Claude housekeep · s start/restart · ⏎ open session/window · q leave"
+            " ⇥ tabs · esc projects · o switch project · j/k move · / filter · n new task · g cluster · H let Claude housekeep · s start/restart · S in background · ⏎ open session/window · q leave"
         }
     }
 }

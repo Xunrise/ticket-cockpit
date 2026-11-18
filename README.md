@@ -53,7 +53,8 @@ cockpit         # outside tmux: attach to (or create) the cockpit session; insid
 | `1`-`4`, `a`, `x` | pick an option of a question, accept, interrupt |
 | `r` | type a reply to the session |
 | quick-reply keys | send a canned reply (setting `quick_replies`, default `c=continue; y=yes; t=try again; m=merge it; d=start the dev server`) |
-| `s` | start a session for a ready ticket; on an ENDED row restart Claude in its window; on a running one, go there |
+| `S` | start a session in the background: no tab, selection or focus change (also in projects) |
+| `s` | start a session for a ready ticket, switch to the queue and follow it until its row appears; on an ENDED row restart Claude in its window; on a running one, go there |
 | `p`, `l` | set the ticket's project; link a Palaver meeting as context |
 
 Replies are only sent when the prompt is empty (or shows Claude's grey suggestion) and no question is open; the cockpit checks the pane before and after and tells you when a draft of yours is in the way.
