@@ -70,8 +70,10 @@ pub fn window_exists(tmux: &Tmux, name: &str) -> bool {
 }
 
 /// `claude "$TK_PROMPT"` in a login shell without inherited Claude variables; the window keeps a shell afterwards.
+/// The command a session window runs. COCKPIT_CLAUDE replaces the `claude` binary (tests use a stand-in).
 fn claude_cmd() -> String {
-    format!("/bin/zsh -lc {}", sh_quote(&format!(r#"{UNSET_CLAUDE}; claude "$TK_PROMPT"; exec zsh"#)))
+    let claude = std::env::var("COCKPIT_CLAUDE").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "claude".into());
+    format!("/bin/zsh -lc {}", sh_quote(&format!(r#"{UNSET_CLAUDE}; {claude} "$TK_PROMPT"; exec zsh"#)))
 }
 
 /// Starts an interactive Claude session in a window of its own, without claiming a ticket.
@@ -234,6 +236,26 @@ mod tests {
 
     fn field(t: &Tmux, pane: &str, f: &str) -> i64 {
         t.run(CK, &["display", "-p", "-t", pane, &format!("#{{{f}}}")]).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn starting_a_ticket_opens_its_window_once() {
+        let Some(g) = guard() else { return };
+        let t = &g.0;
+        std::env::set_var("COCKPIT_CLAUDE", "true"); // never launch the real claude from tests
+        let (_d, c) = temp_db();
+        let repo = std::env::temp_dir();
+        c.execute("INSERT INTO repos(name,path) VALUES('demo', ?)", [repo.to_string_lossy()]).unwrap();
+        let key = tickets::create(
+            &c,
+            tickets::NewTicket { repo: "demo".into(), title: "Start me".into(), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(start_ticket(&c, t, &key).unwrap(), format!("cockpit:{key}"));
+        assert!(window_exists(t, &key));
+        assert!(tickets::events(&c, &key).unwrap().iter().any(|e| e["kind"] == "dispatched"));
+        let again = start_ticket(&c, t, &key).unwrap_err().to_string();
+        assert!(again.contains("already has a window"), "{again}");
     }
 
     #[test]

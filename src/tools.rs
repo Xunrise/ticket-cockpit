@@ -530,6 +530,33 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_the_tui_calls_exists() {
+        let sources = [
+            include_str!("tui/app.rs"),
+            include_str!("tui/queue.rs"),
+            include_str!("tui/projects.rs"),
+            include_str!("tui/settings.rs"),
+            include_str!("tui/travel.rs"),
+            include_str!("tui/widgets.rs"),
+            include_str!("tui/api.rs"),
+            include_str!("tui/bindings.rs"),
+            include_str!("tui/mod.rs"),
+        ];
+        let mut used = vec![];
+        for src in sources {
+            for part in src.split("tool(\"").skip(1) {
+                if let Some(name) = part.split('"').next() {
+                    used.push(name.to_string());
+                }
+            }
+        }
+        assert!(used.len() > 10, "found the TUI's tool calls: {used:?}");
+        for name in used {
+            assert!(TOOLS.iter().any(|t| t.name == name), "the TUI calls `{name}`, which the daemon does not have");
+        }
+    }
+
+    #[test]
     fn ticket_add_to_a_project_without_tickets() {
         let (_d, c) = ctx();
         let conn = c.db().unwrap();
