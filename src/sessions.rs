@@ -126,7 +126,16 @@ pub fn handle(conn: &Connection, tmux: &Tmux, env: &HookEnv, h: &Value) -> Resul
         return Ok(String::new());
     }
     let cwd = s(h, "cwd");
-    match s(h, "hook_event_name") {
+    let event = s(h, "hook_event_name");
+    // sessions that started before the cockpit was installed (or while it was down) register on their next event
+    if event != "SessionStart" && event != "SessionEnd" {
+        let known: bool =
+            conn.query_row("SELECT count(*) FROM sessions WHERE id=?", [sid], |r| r.get::<_, i64>(0))? > 0;
+        if !known {
+            register(conn, tmux, env, h)?;
+        }
+    }
+    match event {
         "SessionStart" => return session_start(conn, tmux, env, h),
         "Stop" => {
             let msg = Some(s(h, "last_assistant_message").to_string())
@@ -181,7 +190,8 @@ pub fn handle(conn: &Connection, tmux: &Tmux, env: &HookEnv, h: &Value) -> Resul
     Ok(String::new())
 }
 
-fn session_start(conn: &Connection, tmux: &Tmux, env: &HookEnv, h: &Value) -> Result<String> {
+/// Records a session (repo, cwd, start HEAD, tmux pane, transcript). Returns whether it runs in the cockpit's tmux.
+fn register(conn: &Connection, tmux: &Tmux, env: &HookEnv, h: &Value) -> Result<bool> {
     let (sid, cwd) = (s(h, "session_id"), s(h, "cwd"));
     let now = now_iso();
     conn.execute(
@@ -195,6 +205,12 @@ fn session_start(conn: &Connection, tmux: &Tmux, env: &HookEnv, h: &Value) -> Re
         conn.execute("UPDATE sessions SET tmux_pane=? WHERE id=?", params![pane, sid])?;
     }
     conn.execute("UPDATE sessions SET transcript=? WHERE id=?", params![h["transcript_path"].as_str(), sid])?;
+    Ok(on_cockpit)
+}
+
+fn session_start(conn: &Connection, tmux: &Tmux, env: &HookEnv, h: &Value) -> Result<String> {
+    let sid = s(h, "session_id");
+    let on_cockpit = register(conn, tmux, env, h)?;
     let issue = env.tk_issue.as_deref().map(|k| tickets::find(conn, k)).transpose()?.flatten();
     if let Some(t) = &issue {
         if t.status != "doing" || t.session.as_deref() != Some(sid) {
@@ -275,6 +291,22 @@ mod tests {
 
     fn start(c: &Connection, t: &Tmux, e: &HookEnv) -> String {
         handle(c, t, e, &ev("SessionStart", json!({"transcript_path": "/x.jsonl"}))).unwrap()
+    }
+
+    #[test]
+    fn a_session_unknown_to_the_cockpit_registers_on_its_next_event() {
+        let (_d, c) = temp_db();
+        let t = Tmux::private("unit");
+        handle(&c, &t, &env(), &ev("UserPromptSubmit", json!({"prompt": "hi", "transcript_path": "/y.jsonl"})))
+            .unwrap();
+        assert_eq!(state(&c), ("working".into(), "thinking".into()));
+        let (cwd, tr): (String, String) = c
+            .query_row("SELECT cwd, transcript FROM sessions WHERE id='s1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((cwd.as_str(), tr.as_str()), ("/tmp", "/y.jsonl"));
+        // SessionEnd of an unknown session does not create one
+        handle(&c, &t, &env(), &json!({"session_id": "s2", "cwd": "/tmp", "hook_event_name": "SessionEnd"})).unwrap();
+        assert_eq!(c.query_row("SELECT count(*) FROM sessions WHERE id='s2'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]
@@ -462,8 +494,6 @@ mod tests {
         let (_d, c) = temp_db();
         let t = Tmux::private("unit");
         assert_eq!(handle(&c, &t, &env(), &json!({"hook_event_name": "Stop"})).unwrap(), "");
-        // events for an unknown session change nothing and do not fail
-        handle(&c, &t, &env(), &ev("UserPromptSubmit", json!({"prompt": "x"}))).unwrap();
         let n: i64 = c.query_row("SELECT count(*) FROM sessions", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
     }
