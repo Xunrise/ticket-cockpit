@@ -3,6 +3,7 @@ pub mod db;
 pub mod panes;
 pub mod paths;
 pub mod projects;
+pub mod sessions;
 pub mod settings;
 pub mod tickets;
 pub mod tmux;

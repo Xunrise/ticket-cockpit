@@ -15,6 +15,12 @@ fn main() {
 fn run(args: Vec<String>) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("add" | "ready" | "show" | "claim" | "comment" | "close") => cli::ticket_command(args),
+        Some("hook") => {
+            let mut input = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+            cockpit::sessions::run_hook(&input); // never fails: a hook must not break a session
+            Ok(())
+        }
         Some(other) => anyhow::bail!("unknown command {other}"),
         None => {
             println!("TUI not built yet");
