@@ -1,6 +1,7 @@
 //! Updates: what is installed, whether something newer exists (local checkout or GitHub release),
 //! and the flows that apply it (`cockpit update | reload | rollback`).
 pub mod local;
+pub mod release;
 
 use crate::ctx::Ctx;
 use crate::settings;
@@ -39,6 +40,8 @@ pub fn check(ctx: &Ctx) -> Result<Value> {
     let installed_commit = installed_commit();
     let mut st = if !settings::get_bool(&conn, "check_updates") {
         json!({"available": null, "commits_ahead": 0, "behind_remote": 0, "summary": "update checks are off", "notes": ""})
+    } else if channel == "release" {
+        release::status(&release::base(), &setting(ctx, "release_repo"), version(), &installed_commit)
     } else {
         local::status(&setting(ctx, "cockpit_repo"), &installed_commit)
     };
