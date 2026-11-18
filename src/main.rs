@@ -27,6 +27,9 @@ fn run(mut args: Vec<String>) -> anyhow::Result<()> {
             cockpit::sessions::run_hook(&input); // never fails: a hook must not break a session
             Ok(())
         }
+        Some("update") => cockpit::update::update_command(args.split_off(1)),
+        Some("reload") => cockpit::update::reload_command(args.split_off(1)),
+        Some("rollback") => cockpit::update::rollback_command(args.split_off(1)),
         Some("install" | "uninstall") => cockpit::install::command(args),
         Some("onboard") => cockpit::onboard::command(args),
         Some(other) => anyhow::bail!("unknown command {other}"),

@@ -11,8 +11,25 @@ use std::time::Duration;
 pub const LABEL: &str = "io.cockpit.daemon";
 pub const DEFAULT_PORT: u16 = 4747;
 
+/// Background work on one thread: requested close-outs every 2 s, the update check on start and every 10 minutes.
+fn scheduler(ctx: Ctx) {
+    let mut ticks = 0u32;
+    loop {
+        if ticks.is_multiple_of(300) {
+            crate::update::refresh(&ctx);
+        }
+        if let Err(e) = crate::closeout::finish_requested(&ctx) {
+            crate::errors::log_quiet(&ctx, "daemon", &format!("close-out: {e:#}"), "");
+        }
+        ticks = ticks.wrapping_add(1);
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
 pub fn run(port: u16) -> Result<()> {
     let state = AppState::new(Ctx::from_env());
+    let ctx = state.ctx.clone();
+    std::thread::spawn(move || scheduler(ctx));
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
@@ -92,7 +109,7 @@ pub fn status(port: u16) -> Value {
     let agent_pid = launchctl(&["print", &target()]).ok().and_then(|o| parse_pid(&o));
     match health(port) {
         Some(h) => {
-            json!({"running": true, "pid": h["pid"], "port": h["port"], "db": h["db"], "uptime_s": h["uptime_s"], "started": h["started"], "build": h["build"], "agent_installed": installed()})
+            json!({"running": true, "pid": h["pid"], "port": h["port"], "db": h["db"], "uptime_s": h["uptime_s"], "started": h["started"], "build": h["build"], "commit": h["commit"], "agent_installed": installed()})
         }
         None => {
             json!({"running": false, "pid": agent_pid, "port": port, "db": paths::db_path(), "uptime_s": null, "agent_installed": installed()})
@@ -112,6 +129,7 @@ fn print_status(s: &Value, as_json: bool) {
         println!("db       {}", s["db"].as_str().unwrap_or(""));
         println!("uptime   {}", format_uptime(s["uptime_s"].as_i64().unwrap_or(0)));
         println!("build    {}", s["build"].as_str().unwrap_or("unknown (older than build ids)"));
+        println!("commit   {}", s["commit"].as_str().unwrap_or("unknown"));
     } else {
         println!("cockpit daemon: not running (nothing answers on port {})", s["port"]);
         println!("db       {}", s["db"].as_str().unwrap_or(""));

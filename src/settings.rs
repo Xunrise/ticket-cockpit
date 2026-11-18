@@ -48,6 +48,36 @@ pub const DEFS: &[Def] = &[
         desc: "Queue keys that send a reply: key=text; …",
         help: "One key in the queue sends a whole reply to the selected session, as if you had typed it and pressed Enter.\n\nFormat: key=text, separated by semicolons. The keys are listed under each session's panel.\n\nThe cockpit will not send when the prompt already has your own text in it, or while Claude shows a question (use 1-4 there).",
     },
+    Def {
+        key: "cockpit_project",
+        default: || json!("ticket-cockpit"),
+        desc: "Cockpit project that receives feedback about the cockpit itself (!)",
+        help: "Pressing ! in the queue files a ticket in this project, and sessions can do the same with cockpit.feedback.\n\nThe ticket goes to the project's home repo; without one, to the repo named by cockpit_repo.",
+    },
+    Def {
+        key: "cockpit_repo",
+        default: || json!(format!("{}/Projects/ticket-cockpit", crate::paths::home().display())),
+        desc: "Checkout of the cockpit's own source",
+        help: "Where the cockpit is built from: `cockpit update` (local channel) builds and installs from main of this checkout, and the update check compares against it.",
+    },
+    Def {
+        key: "check_updates",
+        default: || json!(true),
+        desc: "Let the daemon check for a newer cockpit every 10 minutes",
+        help: "On the local channel the daemon compares the installed commit with main of cockpit_repo (and, hourly, with origin/main). On the release channel it asks GitHub for the latest release.\n\nWhen something newer exists the queue footer says so (U updates).",
+    },
+    Def {
+        key: "update_channel",
+        default: || json!("local"),
+        desc: "Where updates come from: local | release",
+        help: "local: what you build yourself: main of cockpit_repo, cargo install.\n\nrelease: prebuilt binaries from GitHub Releases of release_repo, built by CI. Plain HTTPS, no account needed.",
+    },
+    Def {
+        key: "release_repo",
+        default: || json!("Xunrise/ticket-cockpit"),
+        desc: "GitHub repo of the releases (owner/name); empty = not configured",
+        help: "Used by the release channel: https://github.com/<repo>/releases/latest/download/manifest.json names the latest version and, per target, the asset URL and its sha256.",
+    },
 ];
 
 fn def(key: &str) -> Result<&'static Def> {
@@ -119,6 +149,9 @@ fn validate(key: &str, value: &Value) -> Result<()> {
         "queue_key" if value.as_str().is_some_and(|s| s.trim().is_empty()) => {
             bail!("queue_key must not be empty")
         }
+        "update_channel" if !matches!(value.as_str(), Some("local" | "release")) => {
+            bail!("update_channel must be local or release")
+        }
         "quick_replies" => {
             parse_quick_replies(value.as_str().unwrap_or_default())?;
         }
@@ -179,10 +212,20 @@ mod tests {
     }
 
     #[test]
+    fn the_update_channel_is_local_or_release() {
+        let (_d, c) = temp_db();
+        assert_eq!(get(&c, "update_channel").unwrap(), "local");
+        set(&c, "update_channel", &json!("release")).unwrap();
+        assert!(set(&c, "update_channel", &json!("nightly")).is_err());
+        assert_eq!(get(&c, "release_repo").unwrap(), "Xunrise/ticket-cockpit");
+        assert_eq!(get(&c, "cockpit_project").unwrap(), "ticket-cockpit");
+    }
+
+    #[test]
     fn all_lists_every_setting_with_help() {
         let (_d, c) = temp_db();
         let v = all(&c).unwrap();
-        assert_eq!(v.len(), 6);
+        assert_eq!(v.len(), 11);
         assert!(v.iter().all(|s| !s["help"].as_str().unwrap().is_empty() && s["value"] == s["default"]));
     }
 }

@@ -227,6 +227,7 @@ pub fn context_text(env: &HookEnv, sid: &str, issue: Option<&tickets::Ticket>, o
     let mut t = format!(
         "Local ticket tracker (cockpit). Session id: {sid}. Commands: `{x} ready`, `{x} show KEY`, `{x} add \"title\" \"body\"`,\n`{x} claim KEY --session {sid}`, `{x} comment KEY \"text\" --session {sid}`, `{x} close KEY --summary \"...\" --session {sid}`.\nWhen you work on a ticket, claim it first and close it with a short summary when done."
     );
+    t += &format!("\nIf you hit friction or a bug in the cockpit itself, file it with `{x} tool cockpit.feedback '{{\"text\":\"…\"}}'` instead of working around it.");
     if let Some(i) = issue {
         t += &format!("\nThis session was started for ticket {} (already claimed): {}\n{}", i.key, i.title, i.body);
     }
@@ -307,6 +308,12 @@ mod tests {
         // SessionEnd of an unknown session does not create one
         handle(&c, &t, &env(), &json!({"session_id": "s2", "cwd": "/tmp", "hook_event_name": "SessionEnd"})).unwrap();
         assert_eq!(c.query_row("SELECT count(*) FROM sessions WHERE id='s2'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_start_context_tells_sessions_how_to_report_friction() {
+        let text = context_text(&env(), "s1", None, true);
+        assert!(text.contains("tool cockpit.feedback") && text.contains("instead of working around it"), "{text}");
     }
 
     #[test]

@@ -24,6 +24,9 @@ const MIGRATIONS: &[&str] = &[
     // v2: a project's home repo, so planned tickets can be added before the project has any
     "ALTER TABLE projects ADD COLUMN repo TEXT;
      UPDATE projects SET repo = name WHERE repo IS NULL AND name IN (SELECT name FROM repos);",
+    // v3: the error log, and close-out requests (wrap up, then close the window once the ticket is done)
+    "CREATE TABLE errors(id INTEGER PRIMARY KEY, at TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL, context TEXT NOT NULL DEFAULT '');
+     CREATE TABLE close_requests(ticket TEXT PRIMARY KEY, session TEXT, at TEXT NOT NULL);",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

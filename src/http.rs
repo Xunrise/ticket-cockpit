@@ -112,7 +112,7 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "pid": std::process::id(), "port": s.port.load(std::sync::atomic::Ordering::Relaxed), "db": s.ctx.db_path,
         "started": iso_from_ms(s.started_ms), "uptime_s": (now_ms() - s.started_ms) / 1000, "version": env!("CARGO_PKG_VERSION"),
-        "build": crate::util::build_id(),
+        "build": crate::util::build_id(), "commit": crate::update::installed_commit(),
     }))
 }
 
@@ -141,7 +141,10 @@ async fn tool_route(State(s): State<Arc<AppState>>, Path(name): Path<String>, bo
     let args: Value = if body.is_empty() {
         json!({})
     } else {
-        serde_json::from_slice(&body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("bad JSON: {e}")))?
+        serde_json::from_slice(&body).map_err(|e| {
+            crate::errors::log_quiet(&s.ctx, "http", &format!("tool {name}: bad JSON: {e}"), "");
+            ApiError(StatusCode::BAD_REQUEST, format!("bad JSON: {e}"))
+        })?
     };
     Ok(Json(blocking(move || tools::call(&s.ctx, &name, args)).await?))
 }
@@ -207,17 +210,25 @@ async fn pane_screen(State(s): State<Arc<AppState>>, Path(sid): Path<String>) ->
 
 async fn pane_send(State(s): State<Arc<AppState>>, Path(sid): Path<String>, Json(body): Json<Value>) -> ApiResult {
     blocking(move || {
-        let pane = pane_for(&s.ctx, &sid)?.ok_or(prompt::SendRefused::NoPane)?;
-        let screen = TmuxPane { tmux: &s.ctx.tmux, pane };
-        if let Some(text) = body["text"].as_str().filter(|t| !t.is_empty()) {
-            prompt::send_text(&screen, text, prompt::vim_mode(&s.ctx.claude_settings), &Timing::default())?;
+        let r = (|| -> anyhow::Result<Value> {
+            let pane = pane_for(&s.ctx, &sid)?.ok_or(prompt::SendRefused::NoPane)?;
+            let screen = TmuxPane { tmux: &s.ctx.tmux, pane };
+            if let Some(text) = body["text"].as_str().filter(|t| !t.is_empty()) {
+                prompt::send_text(&screen, text, prompt::vim_mode(&s.ctx.claude_settings), &Timing::default())?;
+            }
+            let keys: Vec<String> = body["keys"]
+                .as_array()
+                .map(|k| k.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            prompt::send_keys(&screen, &keys)?;
+            Ok(json!({"ok": true}))
+        })();
+        if let Err(e) = &r {
+            if !crate::errors::expected(e) {
+                crate::errors::log_quiet(&s.ctx, "http", &format!("send to {sid}: {e:#}"), "");
+            }
         }
-        let keys: Vec<String> = body["keys"]
-            .as_array()
-            .map(|k| k.iter().filter_map(|k| k.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        prompt::send_keys(&screen, &keys)?;
-        Ok(json!({"ok": true}))
+        r
     })
     .await
     .map(Json)
@@ -351,6 +362,7 @@ mod tests {
         let (st, hb) = send(&r, req("GET", "/api/health", h, false, "")).await;
         assert_eq!((st, hb["pid"].as_u64()), (StatusCode::OK, Some(std::process::id() as u64)));
         assert_eq!(hb["build"], crate::util::build_id());
+        assert_eq!(hb["commit"], crate::update::installed_commit());
     }
 
     #[tokio::test]

@@ -7,14 +7,22 @@ Local hub for tickets, projects, Claude sessions and terminals. One binary, one 
 - Tickets belong to projects; projects carry a Palaver link and default dev-server panes.
 - Claude sessions use the same tools through `cockpit tool`.
 
-Design documents: `docs/REQUIREMENTS.md`, `docs/PLAN.md`.
+Design documents: `docs/REQUIREMENTS.md`, `docs/PLAN.md`, and for close-out, reload, update and releases `docs/REQUIREMENTS-closeout.md`, `docs/PLAN-closeout.md`.
 
 ## Install
 
 ```sh
-cargo install --path .     # puts `cockpit` in ~/.cargo/bin
-cockpit install            # tmux config, launchd agent, global Claude hooks
+curl -fsSL https://raw.githubusercontent.com/Xunrise/ticket-cockpit/main/install.sh | sh
 cockpit onboard            # seed projects from your recent Claude sessions
+```
+
+`install.sh` picks the build for your Mac (Apple silicon or Intel), downloads it from the latest GitHub Release, verifies its sha256, installs `~/.local/bin/cockpit` (warns when that is not on your `PATH`), sets `update_channel` to `release`, and runs `cockpit install` (tmux config, launchd agent, global Claude hooks).
+
+For development, build from source instead (the `local` update channel):
+
+```sh
+cargo install --path .     # puts `cockpit` in ~/.cargo/bin
+cockpit install
 ```
 
 `cockpit install` is idempotent and prints what it changed. `--dry-run` prints the same report and writes nothing.
@@ -92,6 +100,22 @@ cockpit tool project.set_services '{"project":"Demo","services":[{"name":"web","
 ```
 
 `GET /api/tools` lists every tool with its parameters. Shortcuts: `cockpit add "title" ["body"]`, `ready [--all]`, `show KEY`, `claim KEY --session ID`, `comment KEY "text"`, `close KEY --summary "..."`. A session started from a ticket (`TK_ISSUE`) claims it automatically.
+
+## Close out, improve, reload, update
+
+| Key | Action |
+|---|---|
+| `C` | close out the selected ticket (queue and projects): wrap up and close (default), close now with a summary, close the window and keep the ticket, drop it. Tool `ticket.close_out`. |
+| `!` | "improve the cockpit": files a ticket in `cockpit_project` with a Context section; empty text files the last error. Tool `cockpit.feedback`; the error log is `cockpit.errors`. |
+| `R` | reload: restart the daemon and replace the queue with the installed binary (`cockpit reload`, `--dry-run` lists the steps). No build. |
+| `U` | update (`cockpit update`, `--dry-run`): then reload. Visible in the `cockpit-update` window. |
+
+The daemon checks every 10 minutes (setting `check_updates`) whether a newer cockpit exists and the queue footer says so. Tool `cockpit.update_status`.
+
+- `update_channel = local` (default): compares the installed commit with `main` of `cockpit_repo` (and hourly with `origin/main`: "pull first"), updates with `cargo install --path .` and `cockpit install`.
+- `update_channel = release`: the latest GitHub Release of `release_repo`, read from its public `manifest.json` (`releases/latest/download/manifest.json`: version, commit, notes, and per target the asset URL and sha256; no account or `gh` needed); `cockpit update` downloads the asset, verifies its sha256, swaps the binary atomically and keeps the old one as `cockpit.prev`; `cockpit rollback` swaps it back.
+
+Releasing: bump `version` in `Cargo.toml`, commit, `git tag vX.Y.Z`, `git push --tags`. `.github/workflows/release.yml` tests, builds both macOS targets and creates the release with the archives, their `.sha256` and `manifest.json`. `ci.yml` runs fmt, clippy and tests on push and PR.
 
 ## Uninstall
 

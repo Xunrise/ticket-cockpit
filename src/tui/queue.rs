@@ -203,6 +203,9 @@ pub fn row_hints(r: &Row) -> Vec<(&'static str, String)> {
     if r.section < READY && r.pane {
         h.insert(0, ("⏎", "attach".into()));
     }
+    if !r.key.is_empty() {
+        h.push(("C", "close out".into()));
+    }
     h
 }
 
@@ -347,10 +350,10 @@ mod tests {
     fn hints_follow_the_state() {
         let r = rows(&state());
         let keys = |r: &Row| row_hints(r).iter().map(|(k, _)| *k).collect::<Vec<_>>();
-        assert_eq!(keys(&r[0]), ["⏎", "1-4", "a", "r", "x"]);
+        assert_eq!(keys(&r[0]), ["⏎", "1-4", "a", "r", "x", "C"]);
         assert_eq!(keys(&r[1]), ["⏎", "r"]);
         assert_eq!(keys(&r[2]), ["⏎", "x"]);
-        assert_eq!(keys(&r[3]), ["s", "S", "p", "l"]);
+        assert_eq!(keys(&r[3]), ["s", "S", "p", "l", "C"]);
         let q = vec![('c', "continue".to_string())];
         let strip = |s: String| s.replace("#[fg=blue,bold]", "<").replace("#[default]", ">");
         assert_eq!(
@@ -390,7 +393,7 @@ mod tests {
         assert_eq!((e.label.as_str(), e.sub.as_str()), ("DEM-3  Dropped", "demo · cockpit:DEM-3"));
         assert!(!e.pane, "no replies go to an ended window");
         let hints: Vec<_> = row_hints(e).into_iter().map(|(k, a)| format!("[{k}] {a}")).collect();
-        assert_eq!(hints, ["[s] restart session", "[⏎] open window"]);
+        assert_eq!(hints, ["[s] restart session", "[⏎] open window", "[C] close out"]);
         // a doing ticket without a window is not listed, nor is a window of a ticket that is not in progress
         let mut st = ended_state();
         st["windows"] = json!([{"name": "DEM-2", "pane": "cockpit:%12", "claude": false}]);

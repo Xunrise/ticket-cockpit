@@ -1,6 +1,6 @@
 [package]
 name = "cockpit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -22,6 +22,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 ratatui = "0.29"
 ureq = { version = "2", features = ["json"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

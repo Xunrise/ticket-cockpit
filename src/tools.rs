@@ -72,8 +72,13 @@ pub const TOOLS: &[Tool] = &[
             let project = str_arg(&a, "project")?;
             let repo = projects::main_repo(&conn, &project)?.ok_or_else(|| anyhow!("project {project} has no tickets"))?;
             let tk = format!("{} tool", c.exe);
+            let errors = if settings::get(&conn, "cockpit_project")?.as_str() == Some(project.as_str()) {
+                format!(" This is the cockpit's own project. Recent cockpit errors, newest first (turn repeated or important ones into tickets with {tk} ticket.add):\n{}\n", crate::errors::digest(&conn))
+            } else {
+                String::new()
+            };
             let prompt = format!(
-                "Housekeeping for the cockpit project \"{project}\". Do not implement anything. Read the project with: {tk} project.overview '{{\"project\":\"{project}\"}}'. Then tidy its planned (todo/backlog) tickets: merge duplicates (cancel the duplicate with {tk} ticket.update '{{\"key\":\"…\",\"status\":\"canceled\"}}' and fold its details into the kept one), group them into a few clear clusters ({tk} ticket.update '{{\"key\":\"…\",\"cluster\":\"…\"}}'), sharpen vague titles, and set priority 1-4 where obvious. Use the done tickets as context for what is already built. Finish with a short list of what you changed and any ticket you think should be dropped (ask before dropping)."
+                "Housekeeping for the cockpit project \"{project}\". Do not implement anything. Read the project with: {tk} project.overview '{{\"project\":\"{project}\"}}'. Then tidy its planned (todo/backlog) tickets: merge duplicates (cancel the duplicate with {tk} ticket.update '{{\"key\":\"…\",\"status\":\"canceled\"}}' and fold its details into the kept one), group them into a few clear clusters ({tk} ticket.update '{{\"key\":\"…\",\"cluster\":\"…\"}}'), sharpen vague titles, and set priority 1-4 where obvious. Use the done tickets as context for what is already built. Finish with a short list of what you changed and any ticket you think should be dropped (ask before dropping).{errors}"
             );
             let name = format!("{}-housekeeping", project.chars().filter(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '-').collect::<String>());
             Ok(json!({"window": panes::run_claude(&conn, &c.tmux, &repo, &name, &prompt)?}))
@@ -207,6 +212,56 @@ pub const TOOLS: &[Tool] = &[
             Ok(fresh)
         },
     },
+    Tool {
+        name: "ticket.close_out",
+        desc: "Close out a ticket: mode wrap (ask its session to wrap up and close; the window closes when done), now (close with summary), keep (window closed, ticket back to todo) or drop (canceled)",
+        params: &[("key", "ticket key"), ("mode", "wrap|now|keep|drop"), ("summary", "optional summary for mode now")],
+        run: |c, a| crate::closeout::close_out(c, &str_arg(&a, "key")?, &str_arg(&a, "mode")?, &opt_str(&a, "summary").unwrap_or_default()),
+    },
+    Tool {
+        name: "cockpit.log_error",
+        desc: "Record an error in the cockpit's error log",
+        params: &[("text", "the error"), ("context", "optional where it happened")],
+        run: |c, a| {
+            crate::errors::log(&c.db()?, "session", &str_arg(&a, "text")?, &opt_str(&a, "context").unwrap_or_default())?;
+            Ok(json!({"ok": true}))
+        },
+    },
+    Tool {
+        name: "cockpit.feedback",
+        desc: "File a bug or improvement for the cockpit itself as a ticket in the cockpit project; empty text files the last error",
+        params: &[("text", "what is wrong or missing"), ("context", "optional object/text with where it happened")],
+        run: |c, a| crate::errors::feedback(c, a["text"].as_str().unwrap_or(""), &a["context"]),
+    },
+    Tool {
+        name: "cockpit.update_status",
+        desc: "Is a newer cockpit available: {channel, installed, available, commits_ahead, behind_remote, summary, notes}",
+        params: &[("refresh", "optional true to check now")],
+        run: |c, a| crate::update::status(c, a["refresh"].as_bool().unwrap_or(false)),
+    },
+    Tool {
+        name: "cockpit.update",
+        desc: "Update the cockpit (local: build from cockpit_repo main; release: download the latest release) in a visible window, then reload. dry_run lists the steps",
+        params: &[("dry_run", "optional true: only list the steps")],
+        run: |c, a| {
+            if a["dry_run"].as_bool().unwrap_or(false) {
+                return Ok(json!({"steps": crate::update::update_steps(c)}));
+            }
+            crate::update::open_window(c, "cockpit-update", "update")
+        },
+    },
+    Tool {
+        name: "cockpit.reload",
+        desc: "Restart the daemon and replace the queue with the installed binary, in a visible window. dry_run lists the steps",
+        params: &[("dry_run", "optional true: only list the steps")],
+        run: |c, a| {
+            if a["dry_run"].as_bool().unwrap_or(false) {
+                return Ok(json!({"steps": crate::update::reload_steps()}));
+            }
+            crate::update::open_window(c, "cockpit-reload", "reload")
+        },
+    },
+    Tool { name: "cockpit.errors", desc: "The last 50 errors of the cockpit", params: &[], run: |c, _| crate::errors::recent(&c.db()?, 50).map(Value::Array) },
     Tool { name: "pane.list", desc: "Panes in a ticket's cockpit window", params: &[PANE_KEY], run: |c, a| Ok(serde_json::to_value(panes::list(&c.tmux, &sel(&a))?)?) },
     Tool {
         name: "pane.run",
@@ -348,9 +403,19 @@ fn for_change(
     Ok(json!({"match": null, "ticket": null}))
 }
 
+/// Runs a tool. Every failure lands in the error log here, the one place HTTP and CLI calls share.
 pub fn call(ctx: &Ctx, name: &str, args: Value) -> Result<Value> {
-    let tool = TOOLS.iter().find(|t| t.name == name).ok_or_else(|| anyhow!("no tool {name}"))?;
-    (tool.run)(ctx, if args.is_null() { json!({}) } else { args })
+    let context = crate::util::truncate(&args.to_string(), 200);
+    let result = match TOOLS.iter().find(|t| t.name == name) {
+        Some(tool) => (tool.run)(ctx, if args.is_null() { json!({}) } else { args }),
+        None => Err(anyhow!("no tool {name}")),
+    };
+    if let Err(e) = &result {
+        if !crate::errors::expected(e) && name != "cockpit.log_error" {
+            crate::errors::log_quiet(ctx, "tool", &format!("{name}: {e:#}"), &context);
+        }
+    }
+    result
 }
 
 pub fn describe() -> Value {
@@ -590,7 +655,7 @@ mod tests {
     #[test]
     fn settings_projects_and_links_through_tools() {
         let (_d, c) = ctx();
-        assert_eq!(t(&c, "settings.get", json!({})).as_array().unwrap().len(), 6);
+        assert_eq!(t(&c, "settings.get", json!({})).as_array().unwrap().len(), 11);
         t(&c, "settings.set", json!({"key": "queue_width", "value": 45}));
         let s = t(&c, "settings.get", json!({}));
         assert_eq!(s.as_array().unwrap().iter().find(|x| x["key"] == "queue_width").unwrap()["value"], 45);
