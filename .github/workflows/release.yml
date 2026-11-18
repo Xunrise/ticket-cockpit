@@ -1,0 +1,68 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: brew install tmux
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+  build:
+    needs: test
+    runs-on: macos-14
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: package
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/cockpit dist/cockpit
+          tar -czf cockpit-${{ matrix.target }}.tar.gz -C dist cockpit
+          shasum -a 256 cockpit-${{ matrix.target }}.tar.gz > cockpit-${{ matrix.target }}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cockpit-${{ matrix.target }}
+          path: cockpit-${{ matrix.target }}.tar.gz*
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: manifest.json
+        run: |
+          tag="$GITHUB_REF_NAME"
+          prev=$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || true)
+          notes=$(git log --oneline ${prev:+$prev..}"$tag" | head -50)
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
+          asset() {
+            f="cockpit-$1.tar.gz"
+            jq -n --arg url "$base/$f" --arg sha "$(cut -d' ' -f1 "assets/$f.sha256")" --argjson size "$(stat -c %s "assets/$f")" \
+              '{url: $url, sha256: $sha, size: $size}'
+          }
+          jq -n --arg version "${tag#v}" --arg commit "$GITHUB_SHA" --arg published "$(date -u +%FT%TZ)" --arg notes "$notes" \
+            --argjson a "$(asset aarch64-apple-darwin)" --argjson x "$(asset x86_64-apple-darwin)" \
+            '{version: $version, commit: $commit, published: $published, notes: $notes,
+              assets: {"aarch64-apple-darwin": $a, "x86_64-apple-darwin": $x}}' > assets/manifest.json
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" assets/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
