@@ -3,6 +3,7 @@ use super::api::{is_down, Api};
 use super::bindings;
 use super::projects;
 use super::queue::{self, Row, READY};
+use super::settings;
 use super::travel::Travel;
 use super::widgets::{input_line, picker_key, render_picker, str, tabs_line, Pick, Picker, PickerKey};
 use crate::tmux::Tmux;
@@ -20,9 +21,10 @@ use serde_json::{json, Value};
 pub enum Tab {
     Queue,
     Projects,
+    Settings,
 }
 
-const TAB_ORDER: [Tab; 2] = [Tab::Queue, Tab::Projects];
+const TAB_ORDER: [Tab; 3] = [Tab::Queue, Tab::Projects, Tab::Settings];
 
 pub struct App {
     pub api: Api,
@@ -40,6 +42,7 @@ pub struct App {
     /// The reply line (`r`).
     pub input: Option<String>,
     pub projects: projects::State,
+    pub settings_state: settings::State,
     pub picker: Option<Picker>,
     pub show_help: bool,
     /// Set while the daemon does not answer.
@@ -71,6 +74,7 @@ impl App {
             flash: String::new(),
             input: None,
             projects: Default::default(),
+            settings_state: Default::default(),
             picker: None,
             show_help: false,
             down: None,
@@ -161,6 +165,7 @@ impl App {
         match self.tab {
             Tab::Queue => self.cur().cloned(),
             Tab::Projects => self.project_focus(),
+            Tab::Settings => None,
         }
     }
 
@@ -168,12 +173,16 @@ impl App {
     fn slot_key(&self, focus_pane: bool) -> String {
         match self.tab {
             Tab::Projects if !focus_pane => self.projects.cur().map(|p| p.key.clone()).unwrap_or_default(),
+            Tab::Settings => self.settings_slot_key(),
             _ => String::new(),
         }
     }
 
     fn slot_text(&self) -> String {
         let key = self.slot_key(false);
+        if self.tab == Tab::Settings {
+            return self.settings_slot_text();
+        }
         if self.tab != Tab::Projects || key.is_empty() {
             return "\n  no live tmux session selected\n".to_string();
         }
@@ -262,7 +271,11 @@ impl App {
         if self.projects.input.is_some() {
             return self.projects_input_key(k);
         }
+        if self.tab == Tab::Settings && self.settings_state.edit.is_some() {
+            return self.settings_key(k);
+        }
         match k.code {
+            KeyCode::Char(',') if self.tab != Tab::Settings => self.enter_settings(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             // q leaves the cockpit (it keeps running, like a daemon); Q stops the queue itself
             KeyCode::Char('q') => match &self.travel {
@@ -278,6 +291,7 @@ impl App {
                     Tab::Projects => {
                         self.projects_key(k);
                     }
+                    Tab::Settings => self.settings_key(k),
                 };
             }
         }
@@ -286,7 +300,10 @@ impl App {
     /// Tab cycles queue → projects → … → queue; the open project is kept.
     fn cycle(&mut self, by: usize) {
         let i = TAB_ORDER.iter().position(|t| *t == self.tab).unwrap_or(0);
-        self.tab = TAB_ORDER[(i + by) % TAB_ORDER.len()];
+        match TAB_ORDER[(i + by) % TAB_ORDER.len()] {
+            Tab::Settings => self.enter_settings(),
+            t => self.tab = t,
+        }
     }
 
     fn mv(&mut self, d: isize) {
@@ -531,9 +548,16 @@ impl App {
     pub fn draw(&self, f: &mut Frame) {
         let [main, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(4)]).areas(f.area());
         let [left, right] = Layout::vertical([Constraint::Min(5), Constraint::Length(12)]).areas(main);
-        if self.tab == Tab::Projects {
-            self.draw_projects(f, left, right);
-            return self.draw_overlays(f, main, bar);
+        match self.tab {
+            Tab::Projects => {
+                self.draw_projects(f, left, right);
+                return self.draw_overlays(f, main, bar);
+            }
+            Tab::Settings => {
+                self.draw_settings(f, main);
+                return self.draw_overlays(f, main, bar);
+            }
+            Tab::Queue => {}
         }
         let tabs = tabs_line(0);
         let mut items = vec![ListItem::new(tabs), ListItem::new("")];
@@ -586,6 +610,7 @@ impl App {
             return Line::from(match self.tab {
                 Tab::Queue => " ⇥ tabs · j/k move · ⏎ attach (⇧esc back) · , settings · s start · p project · l link meeting · r reply (quick replies) · 1-4 pick · a accept · x interrupt · q leave · Q stop queue",
                 Tab::Projects => self.projects_help(),
+                Tab::Settings => " ⇥ queue · j/k move · ⏎ change · r default · q leave",
             })
             .dim();
         }
@@ -627,7 +652,7 @@ pub mod tests {
         assert_eq!(
             &s[..12],
             [
-                " queue   projects   ⇥",
+                " queue   projects   settings   ⇥",
                 "",
                 "NEEDS YOU 1",
                 " DEM-1  Login 42m",
@@ -716,7 +741,7 @@ pub mod tests {
         assert_eq!(
             &s[..7],
             [
-                " queue   projects   ⇥",
+                " queue   projects   settings   ⇥",
                 "PROJECTS 2",
                 "",
                 " ◆ Demo",
@@ -733,7 +758,7 @@ pub mod tests {
         assert_eq!(
             &s[..12],
             [
-                " queue   projects   ⇥",
+                " queue   projects   settings   ⇥",
                 "◆ Demo",
                 "",
                 "PLANNED 2",
@@ -764,7 +789,10 @@ pub mod tests {
         press(&mut a, KeyCode::Enter);
         a.projects.set_overview(projects::sample_overview());
         press(&mut a, KeyCode::Tab);
+        assert_eq!(a.tab, Tab::Settings);
+        press(&mut a, KeyCode::Tab);
         assert_eq!(a.tab, Tab::Queue);
+        press(&mut a, KeyCode::BackTab);
         press(&mut a, KeyCode::BackTab);
         assert_eq!(a.tab, Tab::Projects);
         assert_eq!(a.projects.open.as_deref(), Some("Demo"));
@@ -813,5 +841,90 @@ pub mod tests {
         assert_eq!(shown, ["▸ auth", "+ new cluster \"a\""]);
         let s = screen(&a, 80, 30);
         assert!(s.iter().any(|l| l.contains("Cluster for DEM-2 (type to create)")));
+    }
+
+    fn with_settings() -> App {
+        let mut a = app();
+        a.settings = settings::sample_settings();
+        a.settings_state.conns = settings::sample_conns();
+        a.tab = Tab::Settings;
+        a
+    }
+
+    #[test]
+    fn settings_tab_lists_settings_and_connections() {
+        let a = with_settings();
+        let s = screen(&a, 80, 30);
+        assert_eq!(
+            &s[..20],
+            [
+                " queue   projects   settings   ⇥",
+                "",
+                " SETTINGS",
+                " queue key  S-Escape",
+                "   tmux key that jumps back to the queue",
+                "   [⏎] edit  [r] default",
+                " confirm interrupt  [x]",
+                "   Ask before Esc interrupts",
+                " queue width  40",
+                "   Width of the queue pane in percent",
+                "",
+                " CONNECTIONS",
+                " ● Claude Code hooks  ok",
+                "     7/7 events",
+                " ○ Jira  planned",
+                "     placeholder",
+                "",
+                "",
+                "",
+                "",
+            ]
+        );
+        assert_eq!(a.settings_slot_key(), "settings:0:\"S-Escape\"");
+    }
+
+    #[test]
+    fn settings_selection_walks_into_the_connections() {
+        let mut a = with_settings();
+        for _ in 0..3 {
+            press(&mut a, KeyCode::Char('j'));
+        }
+        assert_eq!(a.settings_state.sel, 3);
+        assert!(a.settings_slot_text().contains("Claude Code hooks"));
+        assert_eq!(a.settings_slot_key(), "settings:3:ok");
+        for _ in 0..9 {
+            press(&mut a, KeyCode::Char('j'));
+        }
+        assert_eq!(a.settings_state.sel, 4, "stops at the last connection");
+        // toggling a checkbox with the daemon away shows the refusal; the value is untouched
+        a.settings_state.sel = 1;
+        press(&mut a, KeyCode::Enter);
+        assert!(a.flash.contains("daemon not running"));
+        // a number is edited inline
+        a.settings_state.sel = 2;
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Backspace);
+        press(&mut a, KeyCode::Char('5'));
+        assert!(screen(&a, 80, 30).iter().any(|l| l == " queue width  45▏"));
+        press(&mut a, KeyCode::Esc);
+        assert!(a.settings_state.edit.is_none() && a.tab == Tab::Settings);
+    }
+
+    #[test]
+    fn tabs_cycle_forward_and_back_and_comma_jumps_to_settings() {
+        let mut a = app();
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.tab, Tab::Settings);
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.tab, Tab::Queue);
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.tab, Tab::Settings);
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.tab, Tab::Queue);
+        press(&mut a, KeyCode::Char(','));
+        assert_eq!(a.tab, Tab::Settings);
+        press(&mut a, KeyCode::Char(','));
+        assert_eq!(a.tab, Tab::Queue);
     }
 }

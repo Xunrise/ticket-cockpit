@@ -40,7 +40,7 @@ pub fn chips(h: &[(&str, String)]) -> Line<'static> {
     Line::from(spans)
 }
 
-pub const TABS: [&str; 2] = ["queue", "projects"];
+pub const TABS: [&str; 3] = ["queue", "projects", "settings"];
 
 /// The tab bar; the active tab is reversed.
 pub fn tabs_line(active: usize) -> Line<'static> {

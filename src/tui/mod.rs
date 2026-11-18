@@ -5,6 +5,7 @@ pub mod app;
 pub mod bindings;
 pub mod projects;
 pub mod queue;
+pub mod settings;
 pub mod travel;
 pub mod widgets;
 

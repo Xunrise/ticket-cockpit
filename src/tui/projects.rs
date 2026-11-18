@@ -403,9 +403,9 @@ impl App {
 
     pub(super) fn projects_help(&self) -> &'static str {
         if self.projects.open.is_none() {
-            " ⇥ settings · j/k move · ⏎ open project · , settings · q leave"
+            " ⇥ tabs · j/k move · ⏎ open project · , settings · q leave"
         } else {
-            " ⇥ settings · esc projects · o switch project · j/k move · / filter · n new task · g cluster · H let Claude housekeep · s start · ⏎ open session · q leave"
+            " ⇥ tabs · esc projects · o switch project · j/k move · / filter · n new task · g cluster · H let Claude housekeep · s start · ⏎ open session · q leave"
         }
     }
 }
