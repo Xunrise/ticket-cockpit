@@ -530,6 +530,24 @@ mod tests {
     }
 
     #[test]
+    fn ticket_add_to_a_project_without_tickets() {
+        let (_d, c) = ctx();
+        let conn = c.db().unwrap();
+        // a project named after a known repo (as onboarding creates them)
+        conn.execute("INSERT INTO repos(name,path) VALUES('ticket-cockpit','/r/ticket-cockpit')", []).unwrap();
+        tickets::ensure_project(&conn, "ticket-cockpit").unwrap();
+        let r = t(&c, "ticket.add", json!({"project": "ticket-cockpit", "title": "first"}));
+        assert_eq!(tickets::get(&conn, r["key"].as_str().unwrap()).unwrap().repo, "ticket-cockpit");
+        // an explicit home repo wins over the name and over where tickets ended up
+        projects::set_repo(&conn, "Toolbox", "cogitator").unwrap();
+        let r = t(&c, "ticket.add", json!({"project": "Toolbox", "title": "x"}));
+        assert_eq!(tickets::get(&conn, r["key"].as_str().unwrap()).unwrap().repo, "cogitator");
+        // nothing to go on: a clear error
+        tickets::ensure_project(&conn, "Empty").unwrap();
+        assert!(call(&c, "ticket.add", json!({"project": "Empty", "title": "x"})).is_err());
+    }
+
+    #[test]
     fn overview_tool_clusters_and_includes_live_sessions() {
         let (_d, c) = ctx();
         let a = mk(&c, "r", Some("P"));

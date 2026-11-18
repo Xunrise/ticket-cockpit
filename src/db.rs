@@ -21,6 +21,9 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX prompts_at ON prompts(at);
      CREATE TABLE links(ticket TEXT, kind TEXT, ref TEXT, title TEXT, path TEXT, why TEXT, at TEXT, PRIMARY KEY(ticket, kind, ref));
      CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    // v2: a project's home repo, so planned tickets can be added before the project has any
+    "ALTER TABLE projects ADD COLUMN repo TEXT;
+     UPDATE projects SET repo = name WHERE repo IS NULL AND name IN (SELECT name FROM repos);",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

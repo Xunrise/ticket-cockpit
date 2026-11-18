@@ -197,12 +197,18 @@ pub fn review(io: &mut Io, props: &mut Vec<Proposal>) {
 pub fn create_projects(conn: &Connection, props: &[Proposal]) -> Result<Vec<String>> {
     let mut created = vec![];
     for p in props {
+        let mut repos = vec![];
         for r in &p.repos {
-            tickets::remember_repo(conn, &r.path)?;
+            repos.push(tickets::remember_repo(conn, &r.path)?);
         }
         if !projects::exists(conn, &p.name)? {
             tickets::ensure_project(conn, &p.name)?;
             created.push(p.name.clone());
+        }
+        if let Some(home) = repos.first() {
+            if projects::main_repo(conn, &p.name)?.is_none() {
+                projects::set_repo(conn, &p.name, home)?;
+            }
         }
     }
     Ok(created)

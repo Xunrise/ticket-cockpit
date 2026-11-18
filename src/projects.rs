@@ -57,14 +57,33 @@ pub fn services(conn: &Connection, project: &str) -> Result<Vec<Service>> {
 }
 
 /// The repo holding most of the project's tickets.
+/// The repo new tickets of a project go to: its home repo, else the repo most of its tickets are in,
+/// else a known repo with the project's name.
 pub fn main_repo(conn: &Connection, project: &str) -> Result<Option<String>> {
-    Ok(conn
+    let home: Option<String> =
+        conn.query_row("SELECT repo FROM projects WHERE name=?", [project], |r| r.get(0)).optional()?.flatten();
+    if home.is_some() {
+        return Ok(home);
+    }
+    let most: Option<String> = conn
         .query_row(
             "SELECT repo FROM tickets WHERE project=? GROUP BY repo ORDER BY count(*) DESC LIMIT 1",
             [project],
             |r| r.get(0),
         )
-        .optional()?)
+        .optional()?;
+    if most.is_some() {
+        return Ok(most);
+    }
+    Ok(conn.query_row("SELECT name FROM repos WHERE name=?", [project], |r| r.get(0)).optional()?)
+}
+
+pub fn set_repo(conn: &Connection, project: &str, repo: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO projects(name, repo) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET repo=excluded.repo",
+        params![project, repo],
+    )?;
+    Ok(())
 }
 
 /// Planned tickets by cluster (A-Z, unclustered last), then rank.
