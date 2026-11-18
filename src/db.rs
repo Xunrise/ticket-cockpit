@@ -103,3 +103,33 @@ mod tests {
         open(&d.path().join("t.db")).unwrap(); // reopening is a no-op
     }
 }
+
+/// Runs a query and returns every row as a JSON object keyed by column name.
+pub fn rows(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<serde_json::Value>> {
+    use rusqlite::types::ValueRef;
+    let mut st = conn.prepare(sql)?;
+    let names: Vec<String> = st.column_names().iter().map(|s| s.to_string()).collect();
+    let out = st
+        .query_map(params, |r| {
+            let mut o = serde_json::Map::new();
+            for (i, n) in names.iter().enumerate() {
+                o.insert(
+                    n.clone(),
+                    match r.get_ref(i)? {
+                        ValueRef::Null => serde_json::Value::Null,
+                        ValueRef::Integer(v) => v.into(),
+                        ValueRef::Real(v) => v.into(),
+                        ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned().into(),
+                        ValueRef::Blob(_) => serde_json::Value::Null,
+                    },
+                );
+            }
+            Ok(serde_json::Value::Object(o))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(out)
+}
