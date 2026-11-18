@@ -147,7 +147,9 @@ pub fn summary_at(ctx: &Ctx, now: i64) -> Result<Value> {
     let doing: Vec<Ticket> = all.iter().filter(|t| t.status == "doing").cloned().collect();
     // ponytail: "today" is the UTC date like the prototype; use the local date if the 1-2 h around midnight matter
     let today = &iso_from_ms(now)[..10];
+    let upd = ctx.update.lock().map(|g| g.clone()).unwrap_or(Value::Null);
     Ok(json!({
+        "update": {"available": !upd["available"].is_null(), "commits": upd["commits_ahead"].as_i64().unwrap_or(0)},
         "focus": focus(&prompt_rows(&conn, now)?, &sessions, &doing, now),
         "windows": crate::panes::windows(&ctx.tmux),
         "calls": ctx.calls.lock().map(|c| c.clone()).unwrap_or(Value::Null),

@@ -65,8 +65,12 @@ pub fn feedback(c: &Ctx, text: &str, context: &Value) -> Result<Value> {
     if !rendered.is_empty() {
         body += &format!("{rendered}\n");
     }
-    body +=
-        &format!("- last error: {}\n- build: {}\n", last_line.as_deref().unwrap_or("none"), crate::util::build_id());
+    body += &format!(
+        "- last error: {}\n- build: {} ({})\n",
+        last_line.as_deref().unwrap_or("none"),
+        crate::util::build_id(),
+        crate::update::installed()
+    );
     let project = settings::get(&conn, "cockpit_project")?.as_str().unwrap_or("ticket-cockpit").to_string();
     let repo_path = settings::get(&conn, "cockpit_repo")?.as_str().unwrap_or_default().to_string();
     tickets::ensure_project(&conn, &project)?;

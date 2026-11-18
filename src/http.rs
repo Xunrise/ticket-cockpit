@@ -112,7 +112,7 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "pid": std::process::id(), "port": s.port.load(std::sync::atomic::Ordering::Relaxed), "db": s.ctx.db_path,
         "started": iso_from_ms(s.started_ms), "uptime_s": (now_ms() - s.started_ms) / 1000, "version": env!("CARGO_PKG_VERSION"),
-        "build": crate::util::build_id(),
+        "build": crate::util::build_id(), "commit": crate::update::installed_commit(),
     }))
 }
 
@@ -362,6 +362,7 @@ mod tests {
         let (st, hb) = send(&r, req("GET", "/api/health", h, false, "")).await;
         assert_eq!((st, hb["pid"].as_u64()), (StatusCode::OK, Some(std::process::id() as u64)));
         assert_eq!(hb["build"], crate::util::build_id());
+        assert_eq!(hb["commit"], crate::update::installed_commit());
     }
 
     #[tokio::test]

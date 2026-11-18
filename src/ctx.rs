@@ -19,6 +19,8 @@ pub struct Ctx {
     pub exe: String,
     /// Latest call and coach baseline; the daemon refreshes it, other processes see the baseline only.
     pub calls: Arc<Mutex<Value>>,
+    /// Latest update check (the daemon refreshes it every 10 minutes).
+    pub update: Arc<Mutex<Value>>,
 }
 
 impl Ctx {
@@ -32,6 +34,7 @@ impl Ctx {
             claude_settings: paths::claude_settings(),
             calls: Arc::new(Mutex::new(json!({"last": null, "baseline": crate::palaver::coach_baseline(&coach_file)}))),
             coach_file,
+            update: Arc::new(Mutex::new(Value::Null)),
             exe: std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "cockpit".into()),
         }
     }
@@ -47,6 +50,7 @@ impl Ctx {
             coach_file: dir.join("coach.json"),
             exe: "cockpit".into(),
             calls: Arc::new(Mutex::new(json!({"last": null, "baseline": null}))),
+            update: Arc::new(Mutex::new(Value::Null)),
         }
     }
 

@@ -233,6 +233,12 @@ pub const TOOLS: &[Tool] = &[
         params: &[("text", "what is wrong or missing"), ("context", "optional object/text with where it happened")],
         run: |c, a| crate::errors::feedback(c, a["text"].as_str().unwrap_or(""), &a["context"]),
     },
+    Tool {
+        name: "cockpit.update_status",
+        desc: "Is a newer cockpit available: {channel, installed, available, commits_ahead, behind_remote, summary, notes}",
+        params: &[("refresh", "optional true to check now")],
+        run: |c, a| crate::update::status(c, a["refresh"].as_bool().unwrap_or(false)),
+    },
     Tool { name: "cockpit.errors", desc: "The last 50 errors of the cockpit", params: &[], run: |c, _| crate::errors::recent(&c.db()?, 50).map(Value::Array) },
     Tool { name: "pane.list", desc: "Panes in a ticket's cockpit window", params: &[PANE_KEY], run: |c, a| Ok(serde_json::to_value(panes::list(&c.tmux, &sel(&a))?)?) },
     Tool {
