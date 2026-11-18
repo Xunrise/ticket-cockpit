@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod db;
 pub mod http;
 pub mod install;
+pub mod onboard;
 pub mod palaver;
 pub mod panes;
 pub mod paths;

@@ -243,7 +243,7 @@ pub fn calls(bin: &Path, coach_file: &Path) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::db::tempdir::Dir;
     use std::os::unix::fs::PermissionsExt;

@@ -27,8 +27,7 @@ fn run(mut args: Vec<String>) -> anyhow::Result<()> {
             Ok(())
         }
         Some("install" | "uninstall") => cockpit::install::command(args),
-        // TODO(plan step 12): seed a fresh install from existing Claude transcripts
-        Some("onboard") => anyhow::bail!("`onboard` is not implemented yet (TODO: plan step 12)"),
+        Some("onboard") => cockpit::onboard::command(args),
         Some(other) => anyhow::bail!("unknown command {other}"),
         None => cockpit::tui::launch(),
     }

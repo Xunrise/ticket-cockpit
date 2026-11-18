@@ -60,15 +60,21 @@ pub struct NewTicket {
     pub status: Option<String>,
 }
 
-/// The main checkout a path belongs to (worktrees resolve to their main repo); remembered in `repos`.
-pub fn repo_at(conn: &Connection, cwd: &str) -> Result<String> {
+/// The main checkout a path belongs to (worktrees resolve to their main repo); None outside a git repo.
+pub fn main_checkout(cwd: &str) -> Option<String> {
     let common = git(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    let path = if common.is_empty() {
-        cwd.to_string()
-    } else {
-        Path::new(&common).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or(common)
-    };
-    let name = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
+    Path::new(&common).parent().filter(|_| !common.is_empty()).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The main checkout a path belongs to (a non-git path stands for itself); remembered in `repos`.
+pub fn repo_at(conn: &Connection, cwd: &str) -> Result<String> {
+    let path = main_checkout(cwd).unwrap_or_else(|| cwd.to_string());
+    remember_repo(conn, &path)
+}
+
+/// Stores `path` under its directory name in `repos` and returns that name.
+pub fn remember_repo(conn: &Connection, path: &str) -> Result<String> {
+    let name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
     conn.execute(
         "INSERT INTO repos(name,path) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET path=excluded.path",
         params![name, path],
